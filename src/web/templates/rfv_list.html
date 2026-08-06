@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}RFV/RFI — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>RFV / RFI</h1><p class="muted">Request, follow-up, response and assessment tracking.</p></div></div>
+<div class="panel">
+  <table class="data">
+    <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Branch</th><th>Due</th><th>Route</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      {% set r = row.record %}
+      <tr>
+        <td class="mono"><a href="/cases/{{ row.case_id }}">{{ r.rfv_rfi_id }}</a></td>
+        <td>{{ r.request_type }}</td>
+        <td>{{ r.status }}</td>
+        <td>{{ r.branch_code or '—' }}</td>
+        <td>{{ r.response_due_at or '—' }}</td>
+        <td>{{ r.post_assessment_route or '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No RFV/RFI records.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

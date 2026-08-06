@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Freeze — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Freeze Actions</h1><p class="muted">Tracking only — execution remains outside this platform.</p></div></div>
+<div class="panel">
+  <table class="data">
+    <thead><tr><th>ID</th><th>Status</th><th>Account</th><th>Reference</th><th>STR obligation</th></tr></thead>
+    <tbody>
+      {% for f in records %}
+      <tr>
+        <td class="mono">{{ f.freeze_id }}</td>
+        <td>{{ f.status }}</td>
+        <td class="mono">{{ f.affected_account_raw or '—' }}</td>
+        <td>{{ f.external_reference or '—' }}</td>
+        <td>{{ 'Yes' if f.creates_str_obligation else 'No' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No freeze actions.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

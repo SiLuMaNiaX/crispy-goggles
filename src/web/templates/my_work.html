@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}My Work — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>My Work</h1>
+    <p class="muted">Assigned cases and directed actions under your ownership.</p>
+  </div>
+</div>
+
+{% if notifications %}
+<div class="notice">
+  <strong>{{ notifications|length }} unread notification(s)</strong>
+  <ul>
+    {% for n in notifications[:5] %}
+    <li>{{ n.title }} — {{ n.message }}{% if n.case_id %} (<a href="/cases/{{ n.case_id }}">{{ n.case_id }}</a>){% endif %}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="panel">
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Case ID</th>
+        <th>Alert ID(s)</th>
+        <th>Customer</th>
+        <th>Stage / Status</th>
+        <th>Owner</th>
+        <th>Priority</th>
+        <th>Historical Match</th>
+        <th>Next Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td><a class="mono" href="/cases/{{ row.case.case_id }}">{{ row.case.case_id }}</a></td>
+        <td class="mono">{{ row.alert_ids|join(', ') }}</td>
+        <td>{{ row.customer_name }}<div class="mono muted">{{ row.customer_id }}</div></td>
+        <td><span class="badge stage-{{ row.case.current_stage }}">{{ row.case.current_stage }}</span></td>
+        <td>{{ row.owner_name }}</td>
+        <td><span class="badge priority-{{ row.case.priority }}">{{ row.case.priority }}</span></td>
+        <td>
+          {% if row.historical_matches %}
+            {{ row.historical_matches|length }} match(es) — confirm manually
+          {% else %}
+            No match
+          {% endif %}
+        </td>
+        <td>{{ row.next_action }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">No cases in your queue.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

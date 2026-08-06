@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Import Batches — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Predator Alert Import</h1>
+    <p class="muted">Source extract is stored immutably. Duplicate Alert IDs are blocked and reconciled.</p>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Upload extract</h2>
+  <form class="stack" method="post" action="/imports/upload" enctype="multipart/form-data">
+    <label>Predator .xlsx file
+      <input type="file" name="file" accept=".xlsx" required />
+    </label>
+    <button type="submit">Import and validate batch</button>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>Batches</h2>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Batch ID</th>
+        <th>Filename</th>
+        <th>Source rows</th>
+        <th>Imported</th>
+        <th>Duplicate</th>
+        <th>Exception</th>
+        <th>Ignored</th>
+        <th>Reconciled</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in batches %}
+      <tr>
+        <td class="mono">{{ b.batch_id }}</td>
+        <td>{{ b.filename }}</td>
+        <td>{{ b.total_source_rows }}</td>
+        <td>{{ b.imported_count }}</td>
+        <td>{{ b.duplicate_count }}</td>
+        <td>{{ b.exception_count }}</td>
+        <td>{{ b.ignored_count }}</td>
+        <td>{% if b.reconciled %}Yes{% else %}No{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">No imports yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

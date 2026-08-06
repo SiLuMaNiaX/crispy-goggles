@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}STR — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>STR Cases</h1><p class="muted">Drafting, review, approval and submission-status tracking.</p></div></div>
+<div class="panel">
+  <table class="data">
+    <thead><tr><th>STR ID</th><th>Status</th><th>Offence</th><th>Reporting</th><th>Duplicate</th><th>Reference</th></tr></thead>
+    <tbody>
+      {% for s in records %}
+      <tr>
+        <td class="mono">{{ s.str_case_id }}</td>
+        <td>{{ s.status }}{% if s.locked %} · locked{% endif %}</td>
+        <td>{{ s.primary_offence_code or '—' }}</td>
+        <td>{{ s.reporting_type or '—' }}</td>
+        <td>{{ s.duplicate_status }}</td>
+        <td class="mono">{{ s.str_reference or '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No STR cases.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

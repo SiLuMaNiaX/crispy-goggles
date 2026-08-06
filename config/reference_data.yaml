@@ -1,0 +1,140 @@
+roles:
+  - OFFICER_1
+  - AML_OFFICER
+  - HOD
+  - STR_REVIEWER
+  - STR_SUBMITTER
+  - SYSTEM_ADMIN
+  - AUDITOR
+
+officer_outcomes:
+  - NON_SUSPICIOUS
+  - SUSPICIOUS
+  - RETURNED_REASSIGNED
+  - UNABLE_TO_COMPLETE
+
+hod_directions:
+  - NFA
+  - RETURN
+  - ASSESS
+  - RFV
+  - RFI
+  - FREEZE
+  - STR
+  - LINK
+  - MONITOR
+  - OTHER
+
+case_states:
+  - IMPORTED
+  - ASSIGNED
+  - UNDER_INVESTIGATION
+  - NON_SUSPICIOUS_REVIEW
+  - PENDING_HOD_REVIEW
+  - RETURNED_TO_OFFICER
+  - ACTION_OPEN
+  - CLOSURE_REVIEW
+  - CLOSED
+  - IMPORT_EXCEPTION
+  - REASSIGNED
+  - AMENDMENT_OPEN
+  - REJECTED
+
+rfv_rfi_statuses:
+  - DRAFT
+  - SENT
+  - AWAITING_RESPONSE
+  - FOLLOW_UP_1
+  - FOLLOW_UP_2
+  - RESPONSE_RECEIVED
+  - UNDER_ASSESSMENT
+  - COMPLETED
+  - CLOSED
+
+freeze_statuses:
+  - DIRECTED
+  - PENDING_INITIATION
+  - INITIATED
+  - PENDING_CONFIRMATION
+  - EFFECTIVE
+  - UNSUCCESSFUL
+  - REJECTED
+  - LIFTED
+  - COMPLETED
+
+str_statuses:
+  - PENDING_DRAFT
+  - DRAFTING
+  - DRAFT_COMPLETED
+  - PENDING_REVIEW
+  - RETURNED_AMENDMENT
+  - APPROVED
+  - PENDING_SUBMISSION
+  - SUBMITTED
+  - ACKNOWLEDGED
+  - NOT_PROCEEDED
+  - WITHDRAWN
+
+duplicate_statuses:
+  - NOT_DUPLICATE
+  - POTENTIAL_DUPLICATE
+  - CONFIRMED_DUPLICATE
+  - LINKED_EXISTING_STR
+
+reporting_types:
+  - INITIAL
+  - SUPPLEMENTAL
+  - DEFENSIVE
+  - OTHER
+
+# CONFIGURABLE — seed taxonomy pending Compliance approval
+offences:
+  - code: ML-001
+    description: Money laundering - proceeds of unlawful activity
+  - code: TF-001
+    description: Terrorism financing - suspected
+  - code: FRD-001
+    description: Fraud-related suspicious activity
+  - code: STR-OTH
+    description: Other reportable suspicious activity
+
+priorities:
+  - LOW
+  - NORMAL
+  - HIGH
+  - CRITICAL
+
+branches:
+  - code: HQ
+    name: Head Office
+  - code: KL01
+    name: Kuala Lumpur Branch 01
+  - code: PG01
+    name: Penang Branch 01
+
+# Pilot users — replace with directory sync when Entra ID is approved
+users:
+  - username: officer1
+    display_name: Officer 1 (Alert Coordinator)
+    roles: [OFFICER_1, AML_OFFICER]
+  - username: aml.officer.a
+    display_name: AML Officer A
+    roles: [AML_OFFICER]
+  - username: aml.officer.b
+    display_name: AML Officer B
+    roles: [AML_OFFICER]
+  - username: hod
+    display_name: Head of Department
+    roles: [HOD]
+  - username: str.reviewer
+    display_name: STR Reviewer
+    roles: [STR_REVIEWER]
+  - username: str.submitter
+    display_name: STR Submitter
+    roles: [STR_SUBMITTER]
+  - username: admin
+    display_name: System Administrator
+    roles: [SYSTEM_ADMIN]
+  - username: auditor
+    display_name: Auditor
+    roles: [AUDITOR]
