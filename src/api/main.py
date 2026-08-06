@@ -61,8 +61,8 @@ with SessionLocal() as _db:
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 
-STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
-TEMPLATES_DIR = Path(__file__).resolve().parent / "web" / "templates"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "web" / "templates"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
