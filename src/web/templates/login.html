@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Sign in — AML Workflow{% endblock %}
+{% block anon %}
+<div class="login-wrap">
+  <div class="login-card">
+    <h1>AML Centralized Workflow</h1>
+    <p class="muted">Rule-based case platform. Predator remains authoritative for alerts and disposition.</p>
+    <form class="stack" method="post" action="/login" style="margin-top:1.25rem">
+      <label>Username
+        <select name="username" required>
+          {% for u in users %}
+          <option value="{{ u.username }}">{{ u.display_name }} ({{ u.username }})</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Password
+        <input type="password" name="password" value="{{ default_password }}" required />
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+    <div class="hint">
+      Pilot accounts use password <span class="mono">{{ default_password }}</span>.
+      No AI decisioning. Officer recommendation and HOD direction are separate events.
+    </div>
+  </div>
+</div>
+{% endblock %}

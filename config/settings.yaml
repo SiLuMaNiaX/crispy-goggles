@@ -1,0 +1,40 @@
+app:
+  name: "AML Centralized Workflow Management"
+  version: "1.0.0"
+  timezone: "Asia/Kuala_Lumpur"
+  date_display_format: "dd/mm/yyyy"
+
+database:
+  url: "sqlite:///./data/aml_workflow.db"
+
+auth:
+  # Pilot: local named accounts. Replace with Entra ID when approved.
+  session_timeout_minutes: 60
+  failed_login_limit: 5
+
+import:
+  allowed_extensions: [".xlsx"]
+  # Duplicate Alert IDs are blocked (FR-IMP-004)
+  batch_policy: "continue_on_row_exception"
+  required_columns:
+    - Alert ID
+    - Customer ID
+    - Customer Name
+    - Assigned PIC
+
+sla:
+  # CONFIGURABLE — placeholders pending business approval (Appendix B)
+  rfv_response_days: 7
+  rfi_response_days: 5
+  action_due_soon_days: 2
+  hod_review_due_days: 3
+  monitoring_default_days: 30
+
+masking:
+  customer_id_visible_roles: ["HOD", "SYSTEM_ADMIN", "AUDITOR", "STR_REVIEWER", "STR_SUBMITTER"]
+  account_visible_roles: ["HOD", "SYSTEM_ADMIN", "AUDITOR", "AML_OFFICER", "STR_REVIEWER"]
+
+features:
+  outlook_draft_generation: false
+  auto_email_send: false
+  ai_decisioning: false

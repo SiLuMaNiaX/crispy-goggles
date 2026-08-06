@@ -1,0 +1,370 @@
+{% extends "base.html" %}
+{% block title %}{{ case.case_id }} — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1 class="mono">{{ case.case_id }}</h1>
+    <p class="muted">
+      <span class="badge stage-{{ case.current_stage }}">{{ case.current_stage }}</span>
+      <span class="badge priority-{{ case.priority }}">{{ case.priority }}</span>
+      {% if customer %} · {{ customer.customer_name }} ({{ customer.customer_id_normalized }}){% endif %}
+    </p>
+  </div>
+  <div>
+    Completeness:
+    <strong>{{ completeness.status }}</strong>
+    ({{ completeness.percentage }}%)
+  </div>
+</div>
+
+<div class="tabs">
+  <a href="#overview">Overview</a>
+  <a href="#alerts">Predator Alerts</a>
+  <a href="#investigation">Investigation</a>
+  <a href="#hod">HOD Reviews</a>
+  <a href="#actions">Actions</a>
+  <a href="#rfv">RFV/RFI</a>
+  <a href="#freeze">Freeze</a>
+  <a href="#str">STR</a>
+  <a href="#history">History</a>
+</div>
+
+<section id="overview" class="panel">
+  <h2>Overview</h2>
+  <div class="split">
+    <div>
+      <p><strong>Status:</strong> {{ case.current_status }}</p>
+      <p><strong>Final outcome:</strong> {{ case.final_outcome or '—' }}</p>
+      <p><strong>Open actions:</strong> {{ actions|selectattr('status', 'ne', 'COMPLETED')|list|length }}</p>
+      {% if matches %}
+      <div class="notice">
+        <strong>Historical matches (human confirmation required — no auto-merge)</strong>
+        <ul>
+          {% for m in matches %}
+          <li><a href="/cases/{{ m.case_id }}">{{ m.case_id }}</a> — RFV/RFI {{ m.rfv_rfi_count }}, STR {{ m.str_count }}, open actions {{ m.open_actions }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      {% if completeness.outstanding %}
+      <div class="error-box">
+        <strong>Outstanding for closure</strong>
+        <ul>{% for item in completeness.outstanding %}<li class="mono">{{ item }}</li>{% endfor %}</ul>
+      </div>
+      {% endif %}
+    </div>
+    <div>
+      {% if user.can('case.close') and case.current_stage == 'CLOSURE_REVIEW' %}
+      <h3>Close case</h3>
+      <form class="stack" method="post" action="/cases/{{ case.case_id }}/close" onsubmit="return confirm('Confirm case closure?');">
+        <label>Final outcome
+          <select name="final_outcome" required>
+            <option value="NON_SUSPICIOUS">Non-suspicious</option>
+            <option value="STR_SUBMITTED">STR submitted</option>
+            <option value="LINKED">Linked</option>
+            <option value="NFA">No further action</option>
+            <option value="OTHER">Other approved outcome</option>
+          </select>
+        </label>
+        <label>Closure rationale<textarea name="closure_rationale" required></textarea></label>
+        <button type="submit">Close and lock</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section id="alerts" class="panel">
+  <h2>Predator Alerts</h2>
+  <table class="data">
+    <thead><tr><th>Alert ID</th><th>Customer ID (raw)</th><th>PIC</th><th>Account</th><th>Type</th><th>Amount</th><th>Batch/Row</th></tr></thead>
+    <tbody>
+      {% for a in alerts %}
+      <tr>
+        <td class="mono">{{ a.alert_id }}</td>
+        <td class="mono">{{ a.customer_id_raw }}</td>
+        <td>{{ a.assigned_pic_raw }}</td>
+        <td class="mono">{{ a.account_number_raw or '—' }}</td>
+        <td>{{ a.alert_type_raw or '—' }}</td>
+        <td>{{ a.amount_raw or '—' }}</td>
+        <td class="mono">row {{ a.source_row_no }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section id="investigation" class="panel">
+  <h2>Investigation</h2>
+  {% if investigations %}
+  <table class="data">
+    <thead><tr><th>ID</th><th>Outcome</th><th>Recommendation</th><th>Summary</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for i in investigations %}
+      <tr>
+        <td>{{ i.id }}</td>
+        <td>{{ i.officer_outcome or '—' }}</td>
+        <td>{{ i.recommendation or '—' }}</td>
+        <td>{{ i.assessment_summary or '—' }}</td>
+        <td>{{ i.status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if case.current_stage in ['ASSIGNED', 'RETURNED_TO_OFFICER', 'REASSIGNED'] and (user.id == case.current_owner_user_id or user.has_role('HOD')) %}
+  <form method="post" action="/cases/{{ case.case_id }}/investigation/start">
+    <button type="submit">Start investigation</button>
+  </form>
+  {% endif %}
+
+  {% if case.current_stage == 'UNDER_INVESTIGATION' and user.can('investigation.update_own') %}
+  <div class="split" style="margin-top:1rem">
+    <form class="stack" method="post" action="/cases/{{ case.case_id }}/investigation/non-suspicious">
+      <h3>Non-suspicious route</h3>
+      <label>Assessment summary<textarea name="assessment_summary" required></textarea></label>
+      <label>Predator reference<input name="predator_reference" /></label>
+      <label><input type="checkbox" name="predator_disposition_confirmed" /> Predator disposition confirmed</label>
+      <button type="submit">Complete as non-suspicious</button>
+    </form>
+    <form class="stack" method="post" action="/cases/{{ case.case_id }}/investigation/suspicious" onsubmit="return confirm('Refer suspicious case to HOD?');">
+      <h3>Suspicious referral</h3>
+      <p class="muted">You may recommend an action but cannot record HOD direction.</p>
+      <label>Assessment summary<textarea name="assessment_summary" required></textarea></label>
+      <label>Grounds for suspicion<textarea name="grounds_for_suspicion" required></textarea></label>
+      <label>Suspected offence
+        <select name="suspected_offence_code" required>
+          {% for o in offences %}<option value="{{ o.code }}">{{ o.code }} — {{ o.description }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Recommendation (not HOD decision)
+        <select name="recommendation">
+          <option value="">No recommendation</option>
+          {% for d in directions %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Predator reference<input name="predator_reference" /></label>
+      <button type="submit" class="danger">Refer to HOD</button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+
+<section id="hod" class="panel">
+  <h2>HOD Reviews</h2>
+  {% if hod_reviews %}
+  <table class="data">
+    <thead><tr><th>Date</th><th>Direction</th><th>Remarks</th><th>Action owner</th><th>Due</th></tr></thead>
+    <tbody>
+      {% for h in hod_reviews %}
+      <tr>
+        <td>{{ h.review_date }}</td>
+        <td><strong>{{ h.direction_code }}</strong></td>
+        <td>{{ h.direction_remarks or '—' }}</td>
+        <td>{{ h.action_owner_id or '—' }}</td>
+        <td>{{ h.action_due_at or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if case.current_stage == 'PENDING_HOD_REVIEW' and user.can('hod.direct') %}
+  <form class="stack" method="post" action="/cases/{{ case.case_id }}/hod/direct" onsubmit="return confirm('Record HOD direction?');" style="margin-top:1rem">
+    <h3>Record direction</h3>
+    <div class="form-row">
+      <label>Direction
+        <select name="direction_code" required>
+          {% for d in directions %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Priority
+        <select name="priority">
+          <option>NORMAL</option><option>HIGH</option><option>CRITICAL</option><option>LOW</option>
+        </select>
+      </label>
+      <label>Action owner
+        <select name="action_owner_id">
+          <option value="">—</option>
+          {% for u in users %}<option value="{{ u.id }}">{{ u.display_name }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+    <label>Remarks / description<textarea name="direction_remarks"></textarea></label>
+    <label>Link target Case ID (for LINK)<input name="link_target_case_id" class="mono" /></label>
+    <label>Description (OTHER)<input name="description" /></label>
+    <button type="submit">Save HOD direction</button>
+  </form>
+  {% endif %}
+</section>
+
+<section id="actions" class="panel">
+  <h2>Actions</h2>
+  <table class="data">
+    <thead><tr><th>Action ID</th><th>Type</th><th>Status</th><th>Owner</th><th>Due</th><th>Outcome</th></tr></thead>
+    <tbody>
+      {% for a in actions %}
+      <tr>
+        <td class="mono">{{ a.action_id }}</td>
+        <td>{{ a.action_type }}</td>
+        <td>{{ a.status }}</td>
+        <td>{{ a.owner_user_id }}</td>
+        <td>{{ a.due_at or '—' }}</td>
+        <td>{{ a.outcome_summary or '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No directed actions.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section id="rfv" class="panel">
+  <h2>RFV / RFI</h2>
+  {% for a in actions if a.rfv_rfi %}
+  {% set r = a.rfv_rfi %}
+  <div class="panel" style="box-shadow:none">
+    <h3 class="mono">{{ r.rfv_rfi_id }} — {{ r.request_type }} / {{ r.status }}</h3>
+    {% if r.status == 'DRAFT' %}
+    <form class="stack" method="post" action="/rfv-rfi/{{ r.rfv_rfi_id }}/send">
+      <div class="form-row">
+        <label>Branch
+          <select name="branch_code" required>
+            {% for b in branches %}<option value="{{ b.code }}">{{ b.code }} — {{ b.name }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Recipient<input name="recipient" required /></label>
+      </div>
+      <label>Requested information<textarea name="requested_information" required>{{ r.requested_information or '' }}</textarea></label>
+      <button type="submit">Mark sent</button>
+    </form>
+    {% elif r.status in ['AWAITING_RESPONSE', 'FOLLOW_UP_1', 'FOLLOW_UP_2'] %}
+    <form class="stack" method="post" action="/rfv-rfi/{{ r.rfv_rfi_id }}/response">
+      <label>Response status<input name="response_status" required placeholder="Received / Partial / ..." /></label>
+      <button type="submit">Record response</button>
+    </form>
+    {% elif r.status == 'RESPONSE_RECEIVED' or r.status == 'UNDER_ASSESSMENT' %}
+    <form class="stack" method="post" action="/rfv-rfi/{{ r.rfv_rfi_id }}/complete">
+      <label>Evidence assessment<textarea name="evidence_assessment" required></textarea></label>
+      <label>Final conclusion<textarea name="final_conclusion" required></textarea></label>
+      <label>Post-assessment route
+        <select name="post_assessment_route" required>
+          <option value="CLOSURE">Resolved → closure review</option>
+          <option value="RETURN_HOD">Concern remains → return to HOD</option>
+        </select>
+      </label>
+      <p class="muted">RFV/RFI completion does not automatically resolve suspicion (BR-008).</p>
+      <button type="submit">Complete assessment</button>
+    </form>
+    {% else %}
+    <p>{{ r.final_conclusion or r.evidence_assessment or 'Completed' }}</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No RFV/RFI records on this case.</p>
+  {% endfor %}
+</section>
+
+<section id="freeze" class="panel">
+  <h2>Freeze Actions</h2>
+  <p class="muted">Tracking only — this system does not execute account freezes (BR-009).</p>
+  {% for a in actions if a.freeze_action %}
+  {% set f = a.freeze_action %}
+  <div class="panel" style="box-shadow:none">
+    <h3 class="mono">{{ f.freeze_id }} — {{ f.status }}</h3>
+    <form class="stack" method="post" action="/freeze/{{ f.freeze_id }}/update">
+      <div class="form-row">
+        <label>Status
+          <select name="status">
+            {% for s in ['DIRECTED','PENDING_INITIATION','INITIATED','PENDING_CONFIRMATION','EFFECTIVE','UNSUCCESSFUL','REJECTED','LIFTED','COMPLETED'] %}
+            <option value="{{ s }}" {% if f.status==s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Affected account<input name="affected_account_raw" value="{{ f.affected_account_raw or '' }}" class="mono" /></label>
+        <label>External reference<input name="external_reference" value="{{ f.external_reference or '' }}" /></label>
+        <label>Outcome<input name="outcome" value="{{ f.outcome or '' }}" /></label>
+      </div>
+      <label><input type="checkbox" name="creates_str_obligation" {% if f.creates_str_obligation %}checked{% endif %} /> Creates STR obligation</label>
+      <label>Notes<textarea name="notes">{{ f.notes or '' }}</textarea></label>
+      <button type="submit">Update freeze tracking</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="muted">No freeze actions.</p>
+  {% endfor %}
+</section>
+
+<section id="str" class="panel">
+  <h2>STR Workflow</h2>
+  {% for a in actions if a.str_case %}
+  {% set s = a.str_case %}
+  <div class="panel" style="box-shadow:none">
+    <h3 class="mono">{{ s.str_case_id }} — {{ s.status }}{% if s.locked %} (LOCKED){% endif %}</h3>
+    <p>Offence: {{ s.primary_offence_code or '—' }} · Reporting: {{ s.reporting_type or '—' }} · Duplicate: {{ s.duplicate_status }}</p>
+
+    {% if not s.locked and s.status in ['PENDING_DRAFT','DRAFTING','RETURNED_AMENDMENT','DRAFT_COMPLETED'] %}
+    <form class="stack" method="post" action="/str/{{ s.str_case_id }}/draft">
+      <label>Grounds<textarea name="grounds_for_suspicion">{{ s.grounds_for_suspicion or '' }}</textarea></label>
+      <label>Narrative<textarea name="narrative">{{ s.narrative or '' }}</textarea></label>
+      <div class="form-row">
+        <label>Offence
+          <select name="primary_offence_code">
+            {% for o in offences %}<option value="{{ o.code }}" {% if s.primary_offence_code==o.code %}selected{% endif %}>{{ o.code }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Reporting type
+          <select name="reporting_type">
+            {% for t in ['INITIAL','SUPPLEMENTAL','DEFENSIVE','OTHER'] %}<option {% if s.reporting_type==t %}selected{% endif %}>{{ t }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+      <label><input type="checkbox" name="mark_draft_completed" /> Submit draft for review</label>
+      <button type="submit">Save draft</button>
+    </form>
+    {% endif %}
+
+    {% if s.status == 'PENDING_REVIEW' and user.can('str.review') %}
+    <form class="stack" method="post" action="/str/{{ s.str_case_id }}/review">
+      <label>Decision
+        <select name="decision"><option value="APPROVE">Approve</option><option value="RETURN">Return for amendment</option></select>
+      </label>
+      <label>Remarks<textarea name="remarks"></textarea></label>
+      <button type="submit">Record review</button>
+    </form>
+    {% endif %}
+
+    {% if s.status in ['APPROVED','PENDING_SUBMISSION'] and user.can('str.submit') %}
+    <form class="stack" method="post" action="/str/{{ s.str_case_id }}/submit" onsubmit="return confirm('Record STR submission reference?');">
+      <label>Official STR reference<input name="str_reference" required class="mono" /></label>
+      <p class="muted">Records submission status only — does not auto-submit to regulator.</p>
+      <button type="submit">Mark submitted</button>
+    </form>
+    {% endif %}
+
+    {% if s.locked or s.status == 'SUBMITTED' %}
+    <form class="stack" method="post" action="/str/{{ s.str_case_id }}/amend">
+      <p class="notice">Submitted content is immutable. Corrections are additive amendments.</p>
+      <label>Amendment<textarea name="amendment_text" required></textarea></label>
+      <button type="submit">Add amendment</button>
+    </form>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No STR cases.</p>
+  {% endfor %}
+</section>
+
+<section id="history" class="panel">
+  <h2>Audit History</h2>
+  {% for h in history %}
+  <div class="history-item">
+    <div><strong>{{ h.action }}</strong> · {{ h.event_category }} · <span class="mono">{{ h.created_at }}</span></div>
+    <div class="muted">{{ h.actor_username or 'system' }}{% if h.reason %} — {{ h.reason }}{% endif %}{% if h.rule_ids %} · {{ h.rule_ids }}{% endif %}</div>
+  </div>
+  {% else %}
+  <p class="muted">No audit events yet.</p>
+  {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Error — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Request blocked</h1></div></div>
+<div class="error-box">
+  <p><strong>{{ error.error }}</strong></p>
+  {% if error.outstanding %}
+  <p>Outstanding:</p>
+  <ul>{% for o in error.outstanding %}<li class="mono">{{ o }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if error.fields %}
+  <p>Fields: <span class="mono">{{ error.fields }}</span></p>
+  {% endif %}
+  {% if error.rule_ids %}
+  <p>Rules: <span class="mono">{{ error.rule_ids|join(', ') }}</span></p>
+  {% endif %}
+  {% if error.requirement_ids %}
+  <p>Requirements: <span class="mono">{{ error.requirement_ids|join(', ') }}</span></p>
+  {% endif %}
+</div>
+<p><a href="javascript:history.back()">Go back</a></p>
+{% endblock %}

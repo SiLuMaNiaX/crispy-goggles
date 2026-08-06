@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Dashboards — AML Workflow{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Dashboards</h1>
+    <p class="muted">Operational, HOD and management visibility.</p>
+  </div>
+  {% if user.can('export.run') %}
+  <form method="post" action="/exports/rfv-rfi">
+    <button type="submit" class="secondary">Export RFV/RFI register</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="grid-metrics">
+  {% for key, value in data.metrics.items() %}
+  <div class="metric">
+    <div class="label">{{ key.replace('_', ' ') }}</div>
+    <div class="value">{{ value }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if data.workload_by_pic %}
+<div class="panel" style="margin-top:1rem">
+  <h2>Workload by PIC</h2>
+  <table class="data">
+    <thead><tr><th>Officer</th><th>Open cases</th></tr></thead>
+    <tbody>
+      {% for u, c in data.workload_by_pic.items() %}
+      <tr><td class="mono">{{ u }}</td><td>{{ c }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if data.recent_imports %}
+<div class="panel">
+  <h2>Recent imports</h2>
+  <table class="data">
+    <thead><tr><th>Batch</th><th>Imported</th><th>Duplicate</th><th>Exception</th></tr></thead>
+    <tbody>
+      {% for b in data.recent_imports %}
+      <tr>
+        <td class="mono">{{ b.batch_id }}</td>
+        <td>{{ b.imported }}</td>
+        <td>{{ b.duplicate }}</td>
+        <td>{{ b.exception }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
