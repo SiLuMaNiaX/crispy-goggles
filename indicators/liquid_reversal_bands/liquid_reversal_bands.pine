@@ -1,0 +1,96 @@
+// Clean-room reconstruction of the published behaviour of "Uptrick: Liquid Reversal Bands".
+// Built from the public description only; constants marked ASSUMED are not confirmed by the author.
+// See README.md in this folder for the derivation and the confirmed/assumed breakdown.
+//@version=6
+indicator("Liquid Reversal Bands (reconstruction)", "LRB-R", overlay = true, max_labels_count = 500)
+
+// ───────────────────────── Inputs ─────────────────────────
+grpFV      = "Liquid Fair Value"
+src        = input.source(close, "Source", group = grpFV)
+fairLen    = input.int(50, "Fair Value Length", minval = 5, group = grpFV, tooltip = "Lookback for both the EMA and the ALMA. Higher = wider, more stable bands, fewer signals.")
+almaOffset = input.float(0.85, "ALMA Offset", minval = 0.0, maxval = 1.0, step = 0.01, group = grpFV)                    // ASSUMED (Pine default)
+almaSigma  = input.float(6.0, "ALMA Sigma", minval = 0.5, step = 0.5, group = grpFV)                                     // ASSUMED (Pine default)
+phaseBias  = input.float(0.5, "Phase Bias (ALMA weight)", minval = 0.0, maxval = 1.0, step = 0.05, group = grpFV)        // ASSUMED
+smoothLen  = input.int(5, "Secondary Smoothing", minval = 1, group = grpFV)                                               // ASSUMED
+
+grpW       = "Band Width"
+wStd       = input.float(0.30, "Weight: StDev of deviation", minval = 0.0, step = 0.05, group = grpW)                     // ASSUMED
+wAtr       = input.float(0.30, "Weight: ATR", minval = 0.0, step = 0.05, group = grpW)                                    // ASSUMED
+wAbs       = input.float(0.20, "Weight: EMA |deviation|", minval = 0.0, step = 0.05, group = grpW)                        // ASSUMED
+wRange     = input.float(0.20, "Weight: EMA bar range", minval = 0.0, step = 0.05, group = grpW)                          // ASSUMED
+innerMult  = input.float(2.0, "Inner Band Multiplier", minval = 0.1, step = 0.1, group = grpW)                           // ASSUMED
+showOuter  = input.bool(true, "Show Outer Bands", group = grpW)
+outerMult  = input.float(3.0, "Outer Band Multiplier", minval = 0.1, step = 0.1, group = grpW)                           // ASSUMED
+
+grpS       = "Signals & Candles"
+showSigs   = input.bool(true, "Show Reversal Signals", group = grpS)
+cooldown   = input.int(10, "Signal Cooldown (bars)", minval = 0, group = grpS)                                            // ASSUMED
+candleMode = input.string("Reversal Heat", "Candle Coloring", options = ["Reversal Heat", "Latest Signal", "Off"], group = grpS)
+
+grpC       = "Colors"
+bullCol    = input.color(#00e5a0, "Bullish", group = grpC)
+bearCol    = input.color(#ff4d6d, "Bearish", group = grpC)
+midCol     = input.color(#8a8fa3, "Neutral", group = grpC)
+
+// ───────────────────── Liquid Fair Value ─────────────────────
+// EMA reacts fast but overshoots; ALMA is smooth but can wobble on gaps. Blend, then a short EMA
+// pass to damp the residual ALMA instability without adding much lag.
+emaFV  = ta.ema(src, fairLen)
+almaFV = ta.alma(src, fairLen, almaOffset, almaSigma)
+rawFV  = emaFV * (1.0 - phaseBias) + almaFV * phaseBias
+lfv    = ta.ema(rawFV, smoothLen)
+
+// ───────────────────── Volatility blend ─────────────────────
+dev       = src - lfv
+volStd    = ta.stdev(dev, fairLen)              // dispersion around fair value
+volAtr    = ta.atr(fairLen)                     // classic true-range volatility
+volAbs    = ta.ema(math.abs(dev), fairLen)      // mean absolute stretch from fair value
+volRange  = ta.ema(high - low, fairLen)         // bar range "energy"
+wSum      = math.max(wStd + wAtr + wAbs + wRange, 1e-10)
+width     = (wStd * volStd + wAtr * volAtr + wAbs * volAbs + wRange * volRange) / wSum
+
+upper      = lfv + innerMult * width
+lower      = lfv - innerMult * width
+upperOuter = lfv + outerMult * width
+lowerOuter = lfv - outerMult * width
+
+// ───────────────────── Reversal signals ─────────────────────
+// A close back inside a band after a close outside it on the previous bar. Wicks alone never trigger.
+bullInner = close[1] < lower[1] and close >= lower
+bearInner = close[1] > upper[1] and close <= upper
+bullOuter = showOuter and close[1] < lowerOuter[1] and close >= lowerOuter
+bearOuter = showOuter and close[1] > upperOuter[1] and close <= upperOuter
+
+var int lastSigBar = na
+var int lastDir    = 0
+canFire  = na(lastSigBar) or bar_index - lastSigBar >= cooldown
+bullSig  = canFire and (bullInner or bullOuter)
+bearSig  = canFire and not bullSig and (bearInner or bearOuter)
+if bullSig or bearSig
+    lastSigBar := bar_index
+    lastDir    := bullSig ? 1 : -1
+
+// ───────────────────── Plots ─────────────────────
+pFV = plot(lfv, "Liquid Fair Value", color = color.new(midCol, 0), linewidth = 2)
+pUp = plot(upper, "Upper Band", color = color.new(bearCol, 20))
+pLo = plot(lower, "Lower Band", color = color.new(bullCol, 20))
+pUo = plot(showOuter ? upperOuter : na, "Upper Outer Band", color = color.new(bearCol, 55), style = plot.style_linebr)
+pLo2 = plot(showOuter ? lowerOuter : na, "Lower Outer Band", color = color.new(bullCol, 55), style = plot.style_linebr)
+fill(pFV, pUp, color = color.new(bearCol, 92), title = "Upper Envelope")
+fill(pFV, pLo, color = color.new(bullCol, 92), title = "Lower Envelope")
+fill(pUp, pUo, color = color.new(bearCol, 82), title = "Upper Extension Zone")
+fill(pLo, pLo2, color = color.new(bullCol, 82), title = "Lower Extension Zone")
+
+plotshape(showSigs and bullSig, "Bullish Reversal", shape.labelup, location.belowbar, bullCol, text = "▲", textcolor = color.white, size = size.small)
+plotshape(showSigs and bearSig, "Bearish Reversal", shape.labeldown, location.abovebar, bearCol, text = "▼", textcolor = color.white, size = size.small)
+
+// Reversal Heat: 0 at the lower band (bullish reversal pressure) → 1 at the upper band (bearish).
+span    = upper - lower
+heatPos = span > 0 ? math.max(0.0, math.min(1.0, (close - lower) / span)) : 0.5
+heatCol = heatPos < 0.5 ? color.from_gradient(heatPos, 0.0, 0.5, bullCol, midCol) : color.from_gradient(heatPos, 0.5, 1.0, midCol, bearCol)
+sigCol  = lastDir == 1 ? bullCol : lastDir == -1 ? bearCol : midCol
+barcolor(candleMode == "Reversal Heat" ? heatCol : candleMode == "Latest Signal" ? sigCol : na)
+
+// ───────────────────── Alerts ─────────────────────
+alertcondition(bullSig, "Bullish Reversal", "LRB-R: bullish reversal on {{ticker}} @ {{close}}")
+alertcondition(bearSig, "Bearish Reversal", "LRB-R: bearish reversal on {{ticker}} @ {{close}}")
