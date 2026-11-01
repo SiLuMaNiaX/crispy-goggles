@@ -1,0 +1,80 @@
+// Clean-room reconstruction of the published behaviour of "Decycler High-Low Breakout [SchizoQuant]".
+// Built from the public description plus Ehlers' published Decycler formula; constants marked ASSUMED
+// are not confirmed by the author. See README.md in this folder for the derivation.
+//@version=6
+indicator("Decycler High-Low Breakout (reconstruction)", "DHLB-R", overlay = true)
+
+// ───────────────────────── Inputs ─────────────────────────
+grpF        = "Decycler"
+cutoff      = input.int(60, "Decycler Cutoff Period", minval = 4, group = grpF)                                       // ASSUMED default
+showChannel = input.bool(true, "Show High/Low Channel", group = grpF)
+
+grpV        = "Channel Defense"
+atrLen      = input.int(14, "ATR Length", minval = 1, group = grpV)                                                  // ASSUMED default
+padMult     = input.float(0.5, "Channel Padding (ATR)", minval = 0.0, step = 0.1, group = grpV)                      // ASSUMED default
+breath      = input.float(0.5, "Trend Breathing Room", minval = 0.0, step = 0.1, group = grpV)                       // ASSUMED form + default
+
+grpS        = "Confirmation"
+slopeLen    = input.int(5, "Slope Period", minval = 1, group = grpS)                                                  // ASSUMED default
+slopeThr    = input.float(0.25, "Slope Threshold (ATR)", minval = 0.0, step = 0.05, group = grpS)                     // ASSUMED default
+strongMult  = input.float(1.0, "Strong Breakout Override (ATR)", minval = 0.0, step = 0.1, group = grpS)             // ASSUMED form + default
+
+grpC        = "Display"
+showSigs    = input.bool(true, "Show Trend Flips", group = grpC)
+colorBars   = input.bool(true, "Color Candles by Trend", group = grpC)
+bullCol     = input.color(#26c6da, "Bullish", group = grpC)
+bearCol     = input.color(#ef5350, "Bearish", group = grpC)
+midCol      = input.color(#9e9e9e, "Neutral", group = grpC)
+
+// ───────────────────── Ehlers 2-pole Decycler ─────────────────────
+// Decycler = src − 2-pole Butterworth high-pass(src). Cycles shorter than `period` are removed,
+// leaving the trend with almost no lag (a linear ramp passes through unchanged).
+decycler(float src, int period) =>
+    float w   = 0.707 * 2.0 * math.pi / period
+    float a   = (math.cos(w) + math.sin(w) - 1.0) / math.cos(w)
+    float d2  = src - 2.0 * nz(src[1], src) + nz(src[2], src)
+    float hp  = 0.0
+    hp := bar_index < 2 ? 0.0 : math.pow(1.0 - a / 2.0, 2) * d2 + 2.0 * (1.0 - a) * nz(hp[1]) - math.pow(1.0 - a, 2) * nz(hp[2])
+    src - hp
+
+dcH = decycler(high, cutoff)
+dcL = decycler(low, cutoff)
+dcC = decycler(close, cutoff)
+atr = ta.atr(atrLen)
+
+// ───────────────────── Slope & adaptive channel ─────────────────────
+// Slope of the filtered close over `slopeLen` bars, in ATR units: comparable across symbols/timeframes.
+slope = atr > 0 ? (dcC - dcC[slopeLen]) / atr : 0.0
+
+// Each boundary is padded by volatility, plus extra room proportional to the strength of the move it
+// defends against, so a strong trend is not knocked out by an ordinary pullback.
+upperBound = dcH + atr * (padMult + breath * math.max(-slope, 0.0))
+lowerBound = dcL - atr * (padMult + breath * math.max(slope, 0.0))
+
+// ───────────────────── Trend state machine ─────────────────────
+// Flip only on a close beyond the opposing boundary AND (slope confirmation OR a decisive breakout).
+var int trend = 0
+bullBreak = close > upperBound and (slope >= slopeThr or close > upperBound + strongMult * atr)
+bearBreak = close < lowerBound and (slope <= -slopeThr or close < lowerBound - strongMult * atr)
+goLong  = trend != 1 and bullBreak
+goShort = trend != -1 and bearBreak and not goLong
+if goLong
+    trend := 1
+else if goShort
+    trend := -1
+
+// ───────────────────── Plots ─────────────────────
+trendCol = trend == 1 ? bullCol : trend == -1 ? bearCol : midCol
+pMid = plot(dcC, "Decycler Close", color = trendCol, linewidth = 2)
+pUp  = plot(showChannel ? upperBound : na, "Upper Boundary", color = color.new(bearCol, 50))
+pLo  = plot(showChannel ? lowerBound : na, "Lower Boundary", color = color.new(bullCol, 50))
+fill(pMid, pUp, color = trend == -1 ? color.new(bearCol, 88) : na, title = "Bear Defense")
+fill(pMid, pLo, color = trend == 1 ? color.new(bullCol, 88) : na, title = "Bull Defense")
+
+plotshape(showSigs and goLong, "Long Flip", shape.triangleup, location.belowbar, bullCol, size = size.small)
+plotshape(showSigs and goShort, "Short Flip", shape.triangledown, location.abovebar, bearCol, size = size.small)
+barcolor(colorBars ? trendCol : na)
+
+// ───────────────────── Alerts ─────────────────────
+alertcondition(goLong, "Long Flip", "DHLB-R: trend flipped LONG on {{ticker}} @ {{close}}")
+alertcondition(goShort, "Short Flip", "DHLB-R: trend flipped SHORT on {{ticker}} @ {{close}}")
