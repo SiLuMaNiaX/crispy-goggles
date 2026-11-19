@@ -1,0 +1,261 @@
+//@version=6
+// Highway Matrix — clean-room rebuild of the "UC Highway Matrix" look seen in
+// the Ultimate CEO Highway demo video. Built from observed behaviour only;
+// no original code was available. See README.md for the analysis.
+indicator("Highway Matrix (rebuild)", "HWM", overlay = true, max_bars_back = 1500,
+     max_labels_count = 500, max_boxes_count = 50, max_polylines_count = 20)
+
+// ───────────────────────── Inputs ─────────────────────────
+grpK  = "Kernel envelope (the curved zones)"
+src   = input.source(close, "Source", group = grpK)
+bw    = input.float(20.0, "Bandwidth / smoothness", minval = 1, group = grpK)
+win   = input.int(500, "Window (bars)", minval = 50, maxval = 1400, group = grpK)
+mIn   = input.float(1.5, "Inner band × MAE (grey line)", minval = 0.1, group = grpK)
+mOut  = input.float(3.0, "Outer band × MAE (green line)", minval = 0.1, group = grpK)
+mode  = input.string("Non-repainting", "Mode", options = ["Non-repainting", "Repainting (video look)"], group = grpK,
+     tooltip = "Repainting redraws the whole curve on every bar using future bars. It looks perfect in hindsight but cannot be traded live.")
+
+grpH  = "Highway (stepped blue band)"
+hwTF  = input.timeframe("30", "Highway timeframe", group = grpH)
+hwLen = input.int(20, "Highway EMA length", minval = 1, group = grpH)
+hwMul = input.float(0.5, "Highway width × ATR", minval = 0, group = grpH)
+
+grpS  = "Signals"
+useMom = input.bool(true, "Require EMA momentum confirm", group = grpS)
+emaF   = input.int(5, "Fast EMA", group = grpS)
+emaS   = input.int(13, "Slow EMA", group = grpS)
+cd     = input.int(10, "Cooldown bars between signals", minval = 0, group = grpS)
+
+grpP  = "Projection"
+showBox = input.bool(true, "Show next-zone box", group = grpP)
+boxLen  = input.int(40, "Box length (bars)", minval = 5, group = grpP)
+fcOn    = input.bool(true, "Show echo forecast (dotted path)", group = grpP)
+fcLook  = input.int(1000, "Forecast search lookback", minval = 200, maxval = 1300, group = grpP)
+fcPat   = input.int(50, "Pattern length", minval = 10, maxval = 200, group = grpP)
+fcHor   = input.int(120, "Forecast horizon (bars)", minval = 10, maxval = 300, group = grpP)
+
+grpD  = "Dashboard"
+dPos  = input.string("Middle Right", "Position", options = ["Top Right", "Middle Right", "Bottom Right", "Top Left", "Middle Left", "Bottom Left"], group = grpD)
+dSize = input.string("Small", "Size", options = ["Tiny", "Small", "Normal"], group = grpD)
+
+// ───────────────────────── Colours ─────────────────────────
+cSellZ = color.new(#b2263a, 75)
+cBuyZ  = color.new(#1aa7a1, 75)
+cOuter = #26c281
+cInner = color.new(#b0b0b0, 0)
+cHw    = #3d8bfd
+cHwF   = color.new(#787b86, 85)
+
+isNR = mode == "Non-repainting"
+
+// ───────────────────────── Kernel (endpoint, non-repainting) ─────────────────────────
+gw(float d, float h) => math.exp(-(d * d) / (2.0 * h * h))
+
+nwEnd(series float s, float h, int n) =>
+    float num = 0.0
+    float den = 0.0
+    for i = 0 to n - 1
+        v = s[i]
+        if not na(v)
+            w = gw(i, h)
+            num += v * w
+            den += w
+    den > 0 ? num / den : na
+
+kLen = math.min(int(math.ceil(bw * 3)), 499)
+mid  = nwEnd(src, bw, kLen)
+mae  = ta.sma(math.abs(src - mid), win)
+upI  = mid + mae * mIn
+upO  = mid + mae * mOut
+loI  = mid - mae * mIn
+loO  = mid - mae * mOut
+
+pUO = plot(isNR ? upO : na, "Upper outer", cOuter, 2)
+pUI = plot(isNR ? upI : na, "Upper inner", cInner, 1)
+pLI = plot(isNR ? loI : na, "Lower inner", cInner, 1)
+pLO = plot(isNR ? loO : na, "Lower outer", cOuter, 2)
+fill(pUO, pUI, cSellZ, "Sell zone")
+fill(pLI, pLO, cBuyZ, "Buy zone")
+
+// ───────────────────────── Highway (HTF stepped band) ─────────────────────────
+[hwC, hwA] = request.security(syminfo.tickerid, hwTF, [ta.ema(close, hwLen)[1], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+hwU = hwC + hwA * hwMul
+hwL = hwC - hwA * hwMul
+pHU = plot(hwU, "Highway upper", cHw, 1, plot.style_stepline)
+pHL = plot(hwL, "Highway lower", cHw, 1, plot.style_stepline)
+fill(pHU, pHL, cHwF, "Highway")
+
+// ───────────────────────── Trend state ─────────────────────────
+slope = mid - mid[1]
+trend = close > hwU and slope > 0 ? 1 : close < hwL and slope < 0 ? -1 : 0
+
+// ───────────────────────── Signals (non-repainting, bar close) ─────────────────────────
+fE = ta.ema(close, emaF)
+sE = ta.ema(close, emaS)
+rawSell = high[1] >= upI[1] and close < upI and close < open and (not useMom or fE < fE[1])
+rawBuy  = low[1]  <= loI[1] and close > loI and close > open and (not useMom or fE > fE[1])
+
+var int lastSig = -100000
+okCd = bar_index - lastSig > cd
+sellSig = barstate.isconfirmed and rawSell and okCd
+buySig  = barstate.isconfirmed and rawBuy  and okCd and not sellSig
+if sellSig or buySig
+    lastSig := bar_index
+
+hSell = sellSig and trend == -1   // with-trend sell = "H-Sell"
+cSell = sellSig and trend != -1   // counter / sideway sell
+hBuy  = buySig and trend == 1
+cBuy  = buySig and trend != 1
+
+if isNR
+    if sellSig
+        label.new(bar_index, high, hSell ? "H-Sell" : "Sell", style = label.style_label_down,
+             color = hSell ? #e53950 : color.new(#e53950, 40), textcolor = color.white, size = size.small)
+    if buySig
+        label.new(bar_index, low, hBuy ? "H-Buy" : "Buy", style = label.style_label_up,
+             color = hBuy ? #22b573 : color.new(#22b573, 40), textcolor = color.white, size = size.small)
+
+alertcondition(hSell, "H-Sell", "Highway Matrix: with-trend SELL from sell zone")
+alertcondition(hBuy,  "H-Buy",  "Highway Matrix: with-trend BUY from buy zone")
+alertcondition(cSell, "Counter Sell", "Highway Matrix: counter-trend SELL")
+alertcondition(cBuy,  "Counter Buy",  "Highway Matrix: counter-trend BUY")
+
+// ───────────────────────── Repainting mode (centred kernel on last bar) ─────────────────────────
+var array<polyline> rpLines  = array.new<polyline>()
+var array<label>    rpLabels = array.new<label>()
+
+if barstate.islast and not isNR and bar_index > 20
+    for pl in rpLines
+        pl.delete()
+    rpLines.clear()
+    for lb in rpLabels
+        lb.delete()
+    rpLabels.clear()
+
+    n = math.min(win, bar_index)
+    K = int(math.ceil(bw * 4))
+    yh = array.new_float(n, na)
+    for j = 0 to n - 1
+        float num = 0.0
+        float den = 0.0
+        iMin = math.max(0, j - K)
+        iMax = math.min(n - 1, j + K)
+        for i = iMin to iMax
+            w = gw(i - j, bw)
+            num += src[i] * w
+            den += w
+        yh.set(j, num / den)
+
+    float sAbs = 0.0
+    for j = 0 to n - 1
+        sAbs += math.abs(src[j] - yh.get(j))
+    m = sAbs / n
+
+    ptsUO = array.new<chart.point>()
+    ptsUI = array.new<chart.point>()
+    ptsLI = array.new<chart.point>()
+    ptsLO = array.new<chart.point>()
+    for j = n - 1 to 0
+        x = bar_index - j
+        y = yh.get(j)
+        ptsUO.push(chart.point.from_index(x, y + m * mOut))
+        ptsUI.push(chart.point.from_index(x, y + m * mIn))
+        ptsLI.push(chart.point.from_index(x, y - m * mIn))
+        ptsLO.push(chart.point.from_index(x, y - m * mOut))
+
+    rpLines.push(polyline.new(ptsUO, line_color = cOuter, line_width = 2))
+    rpLines.push(polyline.new(ptsUI, line_color = cInner))
+    rpLines.push(polyline.new(ptsLI, line_color = cInner))
+    rpLines.push(polyline.new(ptsLO, line_color = cOuter, line_width = 2))
+
+    // filled zones: outer edge forward + inner edge backward, closed
+    sellPoly = ptsUO.copy()
+    tmp = ptsUI.copy()
+    tmp.reverse()
+    sellPoly.concat(tmp)
+    rpLines.push(polyline.new(sellPoly, closed = true, line_color = color.new(color.white, 100), fill_color = cSellZ))
+    buyPoly = ptsLI.copy()
+    tmp2 = ptsLO.copy()
+    tmp2.reverse()
+    buyPoly.concat(tmp2)
+    rpLines.push(polyline.new(buyPoly, closed = true, line_color = color.new(color.white, 100), fill_color = cBuyZ))
+
+    // hindsight "perfect" signals: 5-bar swing highs/lows that pierce the inner band
+    for j = 2 to n - 3
+        y = yh.get(j)
+        isHi = high[j] >= y + m * mIn and high[j] >= high[j - 1] and high[j] >= high[j - 2] and high[j] > high[j + 1] and high[j] > high[j + 2]
+        isLo = low[j]  <= y - m * mIn and low[j]  <= low[j - 1]  and low[j]  <= low[j - 2]  and low[j]  < low[j + 1]  and low[j]  < low[j + 2]
+        if isHi and rpLabels.size() < 450
+            rpLabels.push(label.new(bar_index - j, high[j], "H-Sell", style = label.style_label_down, color = #e53950, textcolor = color.white, size = size.small))
+        if isLo and rpLabels.size() < 450
+            rpLabels.push(label.new(bar_index - j, low[j], "H-Buy", style = label.style_label_up, color = #22b573, textcolor = color.white, size = size.small))
+
+// ───────────────────────── Next-zone box ─────────────────────────
+var box zBox = na
+if barstate.islast and showBox
+    zBox.delete()
+    sellSide = trend != 1
+    top = sellSide ? upO : loI
+    bot = sellSide ? upI : loO
+    zBox := box.new(bar_index + 5, top, bar_index + 5 + boxLen, bot,
+         border_color = sellSide ? #e53950 : #22b573,
+         bgcolor = sellSide ? color.new(#b2263a, 70) : color.new(#1aa7a1, 70),
+         text = sellSide ? "Sell zone" : "Buy zone", text_color = color.new(color.white, 30), text_size = size.small)
+
+// ───────────────────────── Echo forecast (dotted path) ─────────────────────────
+var polyline fcLine = na
+if barstate.islast and fcOn and bar_index > fcLook + fcPat
+    // Pearson correlation of the last fcPat bars against every earlier window
+    float mA = 0.0
+    for t = 0 to fcPat - 1
+        mA += src[t]
+    mA /= fcPat
+    int   bestK = -1
+    float bestR = -2.0
+    for k = fcHor to fcLook - fcPat
+        float mB = 0.0
+        for t = 0 to fcPat - 1
+            mB += src[k + t]
+        mB /= fcPat
+        float sab = 0.0
+        float saa = 0.0
+        float sbb = 0.0
+        for t = 0 to fcPat - 1
+            a = src[t] - mA
+            b = src[k + t] - mB
+            sab += a * b
+            saa += a * a
+            sbb += b * b
+        r = saa > 0 and sbb > 0 ? sab / math.sqrt(saa * sbb) : 0.0
+        if r > bestR
+            bestR := r
+            bestK := k
+    if bestK > 0
+        fcLine.delete()
+        pts = array.new<chart.point>()
+        base = src[bestK]
+        for h = 0 to fcHor
+            pts.push(chart.point.from_index(bar_index + h, src[0] + (src[bestK - h] - base)))
+        fcLine := polyline.new(pts, line_color = color.new(color.white, 40), line_style = line.style_dotted)
+
+// ───────────────────────── Dashboard ─────────────────────────
+posOf(s) =>
+    switch s
+        "Top Right"    => position.top_right
+        "Bottom Right" => position.bottom_right
+        "Top Left"     => position.top_left
+        "Middle Left"  => position.middle_left
+        "Bottom Left"  => position.bottom_left
+        => position.middle_right
+szOf(s) => s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
+var table dash = table.new(posOf(dPos), 1, 2, border_color = #2a6fdb, border_width = 1, frame_color = #2a6fdb, frame_width = 1)
+if barstate.islast
+    tTxt = trend == 1 ? "uptrend" : trend == -1 ? "downtrend" : "sideway"
+    inSell = close >= upI
+    inBuy  = close <= loI
+    status = trend == -1 ? (inSell ? "SELL zone — look for H-Sell" : "wait for price to reach sell zone") :
+             trend == 1  ? (inBuy  ? "BUY zone — look for H-Buy"  : "wait for price to reach buy zone") :
+             (inSell ? "sell zone (counter only)" : inBuy ? "buy zone (counter only)" : "waiting")
+    table.cell(dash, 0, 0, "HIGHWAY TREND DASHBOARD", text_color = color.white, bgcolor = #0b1e3a, text_size = szOf(dSize))
+    table.cell(dash, 0, 1, "current trend = " + tTxt + "\n" + status, text_color = color.white, bgcolor = color.new(#0b1e3a, 20), text_size = szOf(dSize))
