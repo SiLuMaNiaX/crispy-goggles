@@ -70,3 +70,21 @@ Pine Script v6. Paste it into the TradingView Pine editor.
 Parameters that are guesses and may need tuning to match the original: the kernel bandwidth, the band multipliers, the highway EMA length and width, and the forecast pattern length.
 
 The script has not been compiled in TradingView from this environment. If the editor reports an error, paste it back and I'll fix it.
+
+## MetaTrader 5 version (`HighwayMatrix.mq5`)
+
+This is a port of the Pine script with the same logic and defaults.
+
+**Install:** in MT5, go to *File → Open Data Folder → MQL5/Indicators*. Copy `HighwayMatrix.mq5` there, open it in MetaEditor and press **F7** to compile. Then drag *Highway Matrix* onto a chart.
+
+Differences from the Pine version:
+
+- **Fills:** MT5 indicator fills can't be transparent, so the zones use dark solid colours. With `Draw candles over fills` on (the default), the chart's *Chart on foreground* setting is switched on so the candles stay visible.
+- **Highway data:** the highway reads M30 history directly with `CopyRates` and computes its own EMA and Wilder ATR. It uses the previous completed M30 bar, so it doesn't repaint.
+- **Signal text:** signals are arrow buffers, which the Strategy Tester and EAs can read through `iCustom`. The `H-Sell`/`H-Buy` text is drawn with chart objects. Buffers 9–12 are H-Sell, Sell, H-Buy and Buy. Their value is the bar's high or low on a signal bar and `EMPTY_VALUE` otherwise.
+- **Alerts:** a popup alert, plus an optional push notification, fires when a bar closes with a signal.
+- **Performance:** `Max bars to calculate` (default 5000) limits the initial computation. Set it to 0 to calculate the whole history.
+- **Forecast:** the echo forecast is recalculated once per new bar, not on every tick. The chart needs right-side shift turned on to show it.
+- **Repainting mode:** it rewrites the band buffers for the last `Window` bars on every tick. It's for looks only and must not be used with an EA or the Strategy Tester.
+
+It has not been compiled here because there's no MetaEditor in this environment. If F7 shows errors, send them over.
