@@ -88,3 +88,51 @@ Differences from the Pine version:
 - **Repainting mode:** it rewrites the band buffers for the last `Window` bars on every tick. It's for looks only and must not be used with an EA or the Strategy Tester.
 
 It has not been compiled here because there's no MetaEditor in this environment. If F7 shows errors, send them over.
+
+## Expert Advisor (`HighwayMatrixEA.mq5`)
+
+### How it was validated
+
+All research code is in `research/`. The data was **PAXG/USDT 5m candles** from Binance, Jun 2024 → Nov 2026. PAXG is a gold-backed token, used here because this environment has no direct XAUUSD feed. Weekend bars were removed so the data matches XAUUSD trading hours. Two quality notes on this data: before 2025 it traded in $1 steps with thin volume, and it is a stand-in for spot gold, not spot gold itself.
+
+The data was split into two parts:
+- **In-sample:** 2024-06 → 2025-12. All design decisions were made on this part.
+- **Out-of-sample:** 2026-01 → 2026-11. It was used **once**, to test candidates chosen in advance.
+
+Trades enter at the next bar's open. If a bar touches both the stop-loss and the take-profit, the backtest counts the stop-loss (the conservative assumption). The base cost is $0.40 per round trip.
+
+### Findings
+
+1. **No repaint.** The non-repainting indicator gives identical signals on truncated history.
+2. **The signals as published lose money.**
+   - All 5m signals: PF 0.82–0.91 after costs, on every exit model (~4,000 trades).
+   - H-signals: only 175 in 2.5 years, roughly breakeven. An H-Sell needs price to tag the *upper* band while also closing *below* the highway, so the two conditions rarely occur together. On M30 the H filter produced 1–3 trades per year.
+3. **On 5m, costs eat the edge.** Band touches show about 0.1–0.2 MAE of mean reversion, roughly $0.5–1. The round-trip cost is $0.40.
+4. **Gold's bull-market drift inflates long results in-sample.** Shorts lost in almost every configuration in-sample (median PF 0.78).
+5. **What survived:** M30 bars, with signals taken only in the direction of the **D1 EMA(50) slope**. The take-profit is the kernel centre line, and the stop-loss sits 0.25 MAE beyond the outer band.
+
+### Results of the chosen setup ($0.40 cost)
+
+| | Trades | Win % | PF | Notes |
+|---|---|---|---|---|
+| Full 2024-06 → 2026-11 | 349 | 72% | 1.23 | +18.9 R, max drawdown 7.5 R |
+| Out-of-sample 2026 (gold −14%) | 109 | 68% | 1.27 | shorts PF 1.42, longs 1.06 |
+| 6-month windows | — | — | 1.02 / 1.42 / 1.44 / 1.53 / 1.03 | none negative |
+| Cost stress $0 → $1.00 | — | — | 1.31 → 1.11 | |
+| Monte Carlo at 0.5% risk/trade | — | — | — | median +9.7% over 2.4 years, P(loss) 6%, 95th-percentile drawdown 7.5% |
+
+**Caveat:** the t-statistic is **1.63**, so the edge is **not statistically proven**. The average gain is small, about 0.05 R per trade, and a 72% win rate with a far-away stop means occasional large losses. Treat it as a candidate to forward-test, not a proven system.
+
+### EA behaviour
+
+- **Signals:** evaluated once per closed M30 bar, using exactly the indicator's maths (`ComputeSignal`). Each entry is a market order at the next bar's open. The stop-loss and take-profit are set on the server.
+- **Trade limits:** one position at a time. A position is closed after 48 bars. All positions are closed on Friday at 22:30 server time.
+- **Risk:** 0.5% of equity per trade by default. If the minimum lot would risk more than that, the signal is skipped. New entries stop after a 2% daily loss. Entries are blocked when the spread is above $0.60.
+- **Original filter:** `Trend filter = Original highway` uses the video's H-signal definition. It is included for comparison only and was not profitable.
+- **Mismatch with the indicator:** the indicator's `H-` labels still use the highway filter. The EA's trades correspond to the indicator's arrows (H or plain) that agree with the D1 EMA slope.
+
+### Before going live
+
+1. Compile in MetaEditor (F7). It was not compiled here, because there's no MetaEditor in this environment.
+2. Run the Strategy Tester on your broker's **XAUUSD M30** using *Every tick based on real ticks*, and compare against the table above.
+3. Forward-test on demo for at least 2–3 months, about 30+ trades.
