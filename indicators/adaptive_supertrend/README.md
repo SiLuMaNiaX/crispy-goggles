@@ -102,3 +102,15 @@ The EA computes on a rolling window of the last 1,500 bars. `research/window_che
 1. Compile in MetaEditor (F7). It was not compiled here, because there's no MetaEditor in this environment.
 2. Run the Strategy Tester on XAUUSD M30 using real ticks, and compare against the numbers above.
 3. Demo-trade it for 2–3 months. Expect losing streaks of 10 or more trades.
+
+### Intraday mode (added in v1.10)
+
+`Intraday = true` limits new entries to London 08:00 → New York 15:00 and closes positions at New York 16:00, following `gold_intraday/research/intraday.py`.
+
+**Server time setup:** set `Server GMT offset` (winter) and `Server adds +1h in US summer` to match your broker. The defaults, 2 and true, fit the common GMT+2/+3 brokers. The time-zone conversion was checked against the time-zone database: correct on every trading hour from 2024 to 2026.
+
+**Trend filter:** `Trend filter = 4H SuperTrend` takes only entries in the direction of the 4H SuperTrend(14, 3.5, confirm 2).
+
+**Expectations:** tested close to breakeven (PF ~1.06–1.18). Swing mode (the default) remains the best setup found. See `../gold_intraday/README.md`.
+
+**Suggested intraday preset:** M30, Factor 2.0, Confirm 2, Adaptive false, Stop 2 ATR, Trend filter 4H SuperTrend.
