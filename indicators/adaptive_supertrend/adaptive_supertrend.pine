@@ -1,0 +1,138 @@
+//@version=6
+// Adaptive SuperTrend — clean-room rebuild from the public description of
+// "SuperTrend" by TheRealDrip2Rip (TradingView, 2026-11-21). The original
+// source was not used; thresholds marked [ASSUMED] are not in the description.
+indicator("Adaptive SuperTrend (rebuild)", "aST", overlay = true, max_labels_count = 500)
+
+// ───────────────────────── Inputs ─────────────────────────
+atrLen   = input.int(14,    "ATR Length", minval = 1)
+baseF    = input.float(3.5, "Base Factor", minval = 0.1, step = 0.1)
+erLen    = input.int(10,    "ER Length", minval = 2)
+baseConf = input.int(2,     "Confirm Bars", minval = 1)
+
+grpA = "Adaptation"
+volAvgLen = input.int(50,     "Volatility average length", group = grpA)
+fMin      = input.float(0.75, "Min factor scale", group = grpA)
+fMax      = input.float(1.4,  "Max factor scale", group = grpA)
+erChop    = input.float(0.30, "ER below = Choppy (+1 confirm bar)", group = grpA)   // [ASSUMED]
+erTrend   = input.float(0.60, "ER above = Trending (-1 confirm bar)", group = grpA) // [ASSUMED]
+vrHigh    = input.float(1.20, "ATR ratio above = Elevated", group = grpA)           // [ASSUMED]
+vrLow     = input.float(0.80, "ATR ratio below = Compressed", group = grpA)         // [ASSUMED]
+
+grpV = "Visuals"
+showGlow  = input.bool(true, "Glow", group = grpV)
+showShade = input.bool(true, "Shading", group = grpV)
+showBars  = input.bool(true, "Color candles", group = grpV)
+showLbl   = input.bool(true, "Flip labels", group = grpV)
+showDash  = input.bool(true, "Dashboard", group = grpV)
+upCol     = input.color(#26a69a, "Up color", group = grpV)
+dnCol     = input.color(#ef5350, "Down color", group = grpV)
+dPos      = input.string("Top Right", "Dashboard position", options = ["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group = grpV)
+
+// ───────────────────────── Volatility regime → adaptive factor ─────────────────────────
+atr    = ta.atr(atrLen)
+atrAvg = ta.sma(atr, volAvgLen)
+vr     = nz(atr / atrAvg, 1.0)
+factor = baseF * math.max(fMin, math.min(fMax, vr))
+volTxt = vr > vrHigh ? "Elevated" : vr < vrLow ? "Compressed" : "Normal"
+
+// ───────────────────────── Kaufman Efficiency Ratio → adaptive confirmation ─────────────────────────
+change = math.abs(close - close[erLen])
+path   = math.sum(math.abs(close - close[1]), erLen)
+er     = path > 0 ? change / path : 0.0
+confN  = er < erChop ? baseConf + 1 : er > erTrend ? math.max(1, baseConf - 1) : baseConf
+effTxt = er > erTrend ? "Trending" : er < erChop ? "Choppy" : "Mixed"
+
+// ───────────────────────── SuperTrend with a per-bar factor ─────────────────────────
+var float upBand = na
+var float dnBand = na
+var int   rawDir = 1
+src   = hl2
+upNew = src - factor * atr
+dnNew = src + factor * atr
+upBand := na(upBand) ? upNew : close[1] > upBand ? math.max(upNew, upBand) : upNew
+dnBand := na(dnBand) ? dnNew : close[1] < dnBand ? math.min(dnNew, dnBand) : dnNew
+prevRaw = rawDir
+rawDir := rawDir == 1 and close < upBand ? -1 : rawDir == -1 and close > dnBand ? 1 : rawDir
+stLine  = rawDir == 1 ? upBand : dnBand          // the line moves immediately
+
+// ───────────────────────── Confirmation ─────────────────────────
+var int confDir  = 1
+var int heldBars = 0
+heldBars := rawDir != prevRaw ? 1 : heldBars + 1
+flip = rawDir != confDir and heldBars >= confN
+if flip
+    confDir := rawDir
+
+// ───────────────────────── Flip quality ─────────────────────────
+mom5     = (close - close[5]) / atr * confDir                 // momentum in the flip direction
+effS     = er * 100
+volS     = 100 * (1 - math.min(math.abs(vr - 1) / 0.5, 1))    // 100 at ATR ratio 1, 0 at ±0.5 [ASSUMED scaling]
+momS     = 100 * math.max(0, math.min(mom5 / 2.0, 1))         // 2 ATR in 5 bars = full marks [ASSUMED scaling]
+quality  = 0.5 * effS + 0.3 * volS + 0.2 * momS
+grade    = quality >= 70 ? "A" : quality >= 50 ? "B" : "C"
+
+var float lastQ = na
+var string lastG = "-"
+var int nLong = 0
+var int nShort = 0
+var int flipBar = na
+var float erSum = 0.0
+if flip
+    lastQ := quality
+    lastG := grade
+    flipBar := bar_index
+    erSum := 0.0
+    if confDir == 1
+        nLong += 1
+    else
+        nShort += 1
+erSum += er
+age = na(flipBar) ? 0 : bar_index - flipBar
+
+// Conviction: builds with trend age and average efficiency since the flip [ASSUMED formula]
+avgEr      = age > 0 ? erSum / (age + 1) : er
+conviction = math.min(age / 50.0, 1.0) * 0.5 + avgEr * 0.5          // 0..1
+
+// ───────────────────────── Plots ─────────────────────────
+col   = confDir == 1 ? upCol : dnCol
+pLine = plot(stLine, "SuperTrend", col, 2, plot.style_linebr)
+plot(showGlow ? stLine : na, "Glow", color.new(col, 80), 7, plot.style_linebr, display = display.pane)
+pPx   = plot(close, "Price", display = display.none)
+fill(pLine, pPx, showShade ? color.new(col, 92 - int(55 * conviction)) : na, "Trend shading")
+barcolor(showBars ? col : na)
+
+if flip and showLbl
+    txt = (confDir == 1 ? "LONG " : "SHORT ") + grade + "\n" + str.tostring(close, format.mintick)
+    label.new(bar_index, confDir == 1 ? low : high, txt,
+         style = confDir == 1 ? label.style_label_up : label.style_label_down,
+         color = col, textcolor = color.white, size = size.small)
+
+alertcondition(flip and confDir == 1,  "Long Signal",  "Adaptive SuperTrend: LONG")
+alertcondition(flip and confDir == -1, "Short Signal", "Adaptive SuperTrend: SHORT")
+alertcondition(flip,                   "Any Flip",     "Adaptive SuperTrend: flip")
+
+// ───────────────────────── Dashboard ─────────────────────────
+pos = switch dPos
+    "Bottom Right" => position.bottom_right
+    "Top Left"     => position.top_left
+    "Bottom Left"  => position.bottom_left
+    => position.top_right
+var table dash = table.new(pos, 2, 11, bgcolor = color.new(#131722, 10), border_color = #363a45, border_width = 1)
+row(int r, string k, string v, color vc) =>
+    table.cell(dash, 0, r, k, text_color = #b2b5be, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, r, v, text_color = vc, text_size = size.small, text_halign = text.align_right)
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "SuperTrend  F " + str.tostring(factor, "#.##") + "  C " + str.tostring(confN), text_color = color.white, text_size = size.small)
+    table.merge_cells(dash, 0, 0, 1, 0)
+    row(1, "Direction", confDir == 1 ? "LONG" : "SHORT", col)
+    row(2, "Trend age", str.tostring(age) + " bars", color.white)
+    row(3, "Conviction", str.tostring(math.round(conviction * 100)) + "%", color.white)
+    row(4, "Efficiency", effTxt + " (" + str.tostring(er, "#.00") + ")", color.white)
+    row(5, "Volatility", volTxt, color.white)
+    row(6, "Adaptive factor", str.tostring(factor, "#.00"), color.white)
+    row(7, "Last flip", na(lastQ) ? "-" : str.tostring(math.round(lastQ)) + "  " + lastG,
+         lastG == "A" ? upCol : lastG == "C" ? dnCol : color.orange)
+    row(8, "Distance", str.tostring((close - stLine) / close * 100, "#.00") + "%", color.white)
+    row(9, "Long flips", str.tostring(nLong), upCol)
+    row(10, "Short flips", str.tostring(nShort), dnCol)
