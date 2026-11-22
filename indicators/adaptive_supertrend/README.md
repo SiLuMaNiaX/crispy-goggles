@@ -61,3 +61,44 @@ The flip arrows are buffers 3 (long) and 4 (short), so an EA can read them with 
 - **Side switches:** when the line switches sides, MT5 joins the two sides with a connecting segment. Pine leaves a gap.
 
 The file has not been compiled here, because there's no MetaEditor in this environment.
+
+## Expert Advisor (`AdaptiveSuperTrendEA.mq5`)
+
+### Design, chosen on 2024-06 → 2025-12 data only (`research/ea_modes.py`)
+
+| Choice | Tested alternatives | Result (median over 9 TF/factor configs) |
+|---|---|---|
+| **Exit on the next confirmed flip** (stop-and-reverse) | exit when a bar closes through the line; trailing stop at the line | Confirmed flip PF 1.26 ≈ close-through 1.28. The trailing stop scored 1.12, because intrabar wicks stop it out too often. |
+| **Hard stop 2 ATR beyond the line** | 0.5 ATR, 1 ATR | 2 ATR gave the lowest drawdown, with a worst trade of −1.06R. |
+| **Hold over weekends** | close on Friday | Closing on Friday dropped PF from 1.26 to 1.10. A trend-follower gives up too many trends by closing. Gaps are modelled, and stops fill at the gap price. |
+| **Ignore the flip grade** | trade grade A only | Earlier tests showed the grade has no predictive value. |
+
+### 2026 check and stress tests (`research/ea_oos.py`)
+
+- **2026:** 8 of 9 neighbouring configurations were profitable (median PF 1.29). The 30m / factor 3.5 default gave PF 1.59 on 2026 alone.
+- **Full period, 30m / 3.5:** 555 trades, 39% winners, PF 1.48, t-stat 2.84, max drawdown 14.5R, worst trade −1.16R, longest losing streak 11.
+- **Cost stress:** PF 1.53 at $0 cost, 1.36 at $1.50.
+- **Monte Carlo over ~2.4 years:**
+
+  | Risk per trade | Median return | 95th-percentile drawdown |
+  |---|---|---|
+  | 0.5% | +46% | 9% |
+  | 1% | +112% | 18% |
+
+**Be conservative.** 30m / 3.5 is the best of its neighbourhood. Plan around the neighbourhood median (PF about 1.25), which implies roughly half the Monte Carlo returns above. The data is PAXG, a gold-backed token, not broker XAUUSD.
+
+The EA computes on a rolling window of the last 1,500 bars. `research/window_check.py` confirmed this reproduces full-history flips with 0 mismatches in 1,800 checks.
+
+### EA behaviour
+
+- **Signals:** calculated once per closed bar of the signal timeframe (M30 by default). The maths is the same as `adst.py`.
+- **On a confirmed flip:** the EA closes the opposite position, then enters at market with a server-side stop at the line −/+ 2 × ATR. There is no take-profit; the position exits on the next flip or at the stop. After a stop-out it waits for the next flip.
+- **Risk:** 0.5% of equity per trade by default, measured to the hard stop. If the minimum lot would exceed that, the trade is skipped.
+- **Spread:** if the spread is above $0.60, entry is retried on each tick until the bar ends.
+- **Options:** `Adaptive` can be set to false to run a plain SuperTrend, which tested just as well. Friday close is available but off by default.
+
+### Before going live
+
+1. Compile in MetaEditor (F7). It was not compiled here, because there's no MetaEditor in this environment.
+2. Run the Strategy Tester on XAUUSD M30 using real ticks, and compare against the numbers above.
+3. Demo-trade it for 2–3 months. Expect losing streaks of 10 or more trades.
