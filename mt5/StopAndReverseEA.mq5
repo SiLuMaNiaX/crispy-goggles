@@ -8,7 +8,7 @@
 //|    4. a take-profit (or the flip limit) ends the cycle           |
 //+------------------------------------------------------------------+
 #property copyright "crispy-goggles"
-#property version   "1.00"
+#property version   "1.10"
 #property description "Stop-and-reverse (SAR) cycle manager: market entry + tight SL + opposite stop order parked at the SL."
 
 #include <Trade/Trade.mqh>
@@ -29,9 +29,9 @@ input double         InpLots           = 0.02;  // Lots of the first trade in a 
 input double         InpLotMultiplier  = 1.0;   // Lot multiplier per flip (1.0 = flat, 2.0 = martingale)
 input double         InpMaxLots        = 0.50;  // Hard cap on any single order
 input int            InpMaxFlips       = 3;     // Max reversals per cycle (0 = plain SL, no reversal)
-input int            InpStopPoints     = 150;   // Stop-loss distance in points (gold 2-digit: 150 = $1.50)
-input int            InpTakeProfitPts  = 200;   // Take-profit distance in points
-input int            InpReverseOffset  = 0;     // Extra points beyond SL for the reverse stop order
+input double         InpStopDist       = 1.50;  // Stop-loss distance in price units (1.50 = $1.50 on gold)
+input double         InpTakeProfitDist = 2.00;  // Take-profit distance in price units (0 = no TP)
+input double         InpReverseOffset  = 0.0;   // Extra price distance beyond the SL for the reverse stop order
 input bool           InpRecoverLosses  = false; // Widen TP after a flip so a win recovers the cycle's losses
 input int            InpCooldownBars   = 2;     // Bars to wait after a cycle ends before a new one
 
@@ -45,10 +45,11 @@ input int             InpMaxBarsSinceExt = 5;     // Extreme must be at most thi
 input bool            InpInvertSignal    = false; // true = follow the spike instead of fading it
 
 input group "Filters & risk"
-input int    InpMaxSpreadPts     = 40;   // Skip new cycles if spread above this (points, 0 = off)
+input double InpMaxSpread        = 0.40; // Skip new cycles if spread above this, in price units (0 = off)
 input int    InpStartHour        = 0;    // Trading window start (server hour, inclusive)
 input int    InpEndHour          = 24;   // Trading window end (server hour, exclusive)
 input double InpMaxDailyLossPct  = 3.0;  // Stop new cycles after this % daily loss (0 = off)
+input double InpMaxSlippage      = 0.30; // Max slippage on market entries, in price units
 input int    InpOrphanSeconds    = 120;  // Delete a reverse order left without a position after this long
 
 input group "Misc"
@@ -74,14 +75,14 @@ const string CMT_PREFIX = "SAR#";
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   if(InpStopPoints <= 0 || InpLots <= 0 || InpLotMultiplier <= 0)
+   if(InpStopDist <= 0 || InpLots <= 0 || InpLotMultiplier <= 0)
      {
       Print("SAR: invalid inputs (stop, lots and multiplier must be > 0)");
       return INIT_PARAMETERS_INCORRECT;
      }
 
    trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(30);
+   trade.SetDeviationInPoints((ulong)MathMax(1.0, MathRound(InpMaxSlippage / _Point)));
    trade.SetTypeFillingBySymbol(_Symbol);
 
    if(InpEntryMode == ENTRY_SPIKE_FADE)
@@ -206,17 +207,15 @@ void ManagePosition(ulong ticket, int type, double lots, double sl, double open,
    int flip = ParseFlip(cmt);
    g_cycleFlips = flip;
 
-   double pt = _Point;
-
    // 1) attach a stop-loss if missing (manual trades)
    if(sl <= 0.0)
      {
-      double newSL = (type == POSITION_TYPE_BUY) ? open - InpStopPoints * pt
-                                                 : open + InpStopPoints * pt;
+      double newSL = (type == POSITION_TYPE_BUY) ? open - InpStopDist
+                                                 : open + InpStopDist;
       double tp    = PositionGetDouble(POSITION_TP);
-      if(tp <= 0.0 && InpTakeProfitPts > 0)
-         tp = (type == POSITION_TYPE_BUY) ? open + InpTakeProfitPts * pt
-                                          : open - InpTakeProfitPts * pt;
+      if(tp <= 0.0 && InpTakeProfitDist > 0)
+         tp = (type == POSITION_TYPE_BUY) ? open + InpTakeProfitDist
+                                          : open - InpTakeProfitDist;
       newSL = RoundPrice(newSL);
       if(!trade.PositionModify(ticket, newSL, RoundPrice(tp)))
         {
@@ -251,23 +250,22 @@ void ManagePosition(ulong ticket, int type, double lots, double sl, double open,
 //+------------------------------------------------------------------+
 bool PlaceReverse(int posType, double posSL, double posLots, int nextFlip)
   {
-   double pt   = _Point;
    double lots = LotsForFlip(nextFlip);
-   double stopsLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * pt;
+   double stopsLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    string cmt  = CMT_PREFIX + IntegerToString(nextFlip);
 
-   double tpPts = TakeProfitPointsForFlip(lots, posLots);
+   double tpDist = TakeProfitDistForFlip(lots, posLots);
 
    if(posType == POSITION_TYPE_BUY)
      {
       // long stopped out below -> go short there
-      double price = RoundPrice(posSL - InpReverseOffset * pt);
+      double price = RoundPrice(posSL - InpReverseOffset);
       if(price >= bid - stopsLevel)
          return false; // too close to market right now; retry next tick
-      double sl = RoundPrice(price + InpStopPoints * pt);
-      double tp = (tpPts > 0) ? RoundPrice(price - tpPts * pt) : 0.0;
+      double sl = RoundPrice(price + InpStopDist);
+      double tp = (tpDist > 0) ? RoundPrice(price - tpDist) : 0.0;
       if(!trade.SellStop(lots, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt))
         {
          PrintFormat("SAR: SellStop failed: %s", trade.ResultRetcodeDescription());
@@ -277,18 +275,18 @@ bool PlaceReverse(int posType, double posSL, double posLots, int nextFlip)
    else
      {
       // short stopped out above -> go long there
-      double price = RoundPrice(posSL + InpReverseOffset * pt);
+      double price = RoundPrice(posSL + InpReverseOffset);
       if(price <= ask + stopsLevel)
          return false;
-      double sl = RoundPrice(price - InpStopPoints * pt);
-      double tp = (tpPts > 0) ? RoundPrice(price + tpPts * pt) : 0.0;
+      double sl = RoundPrice(price - InpStopDist);
+      double tp = (tpDist > 0) ? RoundPrice(price + tpDist) : 0.0;
       if(!trade.BuyStop(lots, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt))
         {
          PrintFormat("SAR: BuyStop failed: %s", trade.ResultRetcodeDescription());
          return false;
         }
      }
-   PrintFormat("SAR: reverse order placed, flip %d, %.2f lots, TP %.0f pts", nextFlip, lots, tpPts);
+   PrintFormat("SAR: reverse order placed, flip %d, %.2f lots, TP distance %s", nextFlip, lots, DoubleToString(tpDist, _Digits));
    return true;
   }
 
@@ -297,21 +295,20 @@ bool PlaceReverse(int posType, double posSL, double posLots, int nextFlip)
 //| widened so a win covers the cycle's realised losses plus the     |
 //| loss the current position takes when its SL is hit.              |
 //+------------------------------------------------------------------+
-double TakeProfitPointsForFlip(double lots, double currentPosLots)
+double TakeProfitDistForFlip(double lots, double currentPosLots)
   {
-   double base = (double)InpTakeProfitPts;
+   double base = InpTakeProfitDist;
    if(!InpRecoverLosses || base <= 0)
       return base;
 
-   double vpp = ValuePerPointPerLot();
-   if(vpp <= 0 || lots <= 0)
+   double vpu = ValuePerPriceUnitPerLot();
+   if(vpu <= 0 || lots <= 0)
       return base;
 
-   double spreadPts   = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   double pendingLoss = currentPosLots * (InpStopPoints + spreadPts) * vpp; // loss when current SL hits
+   double pendingLoss = currentPosLots * (InpStopDist + CurrentSpread()) * vpu; // loss when current SL hits
    double toRecover   = MathMax(0.0, -g_cyclePL) + pendingLoss;
-   double target      = base * lots * vpp;                                  // the normal profit target
-   return MathCeil((toRecover + target) / (lots * vpp));
+   double target      = base * lots * vpu;                                      // the normal profit target
+   return (toRecover + target) / (lots * vpu);                                  // rounded later by RoundPrice
   }
 
 //+------------------------------------------------------------------+
@@ -333,9 +330,8 @@ void TryStartCycle()
       return;
      }
 
-   double pt   = _Point;
    double lots = LotsForFlip(0);
-   double tpPts= (double)InpTakeProfitPts;
+   double tpDist = InpTakeProfitDist;
    string cmt  = CMT_PREFIX + "0";
    bool ok;
 
@@ -345,15 +341,15 @@ void TryStartCycle()
    if(dir > 0)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double sl  = RoundPrice(ask - InpStopPoints * pt);
-      double tp  = (tpPts > 0) ? RoundPrice(ask + tpPts * pt) : 0.0;
+      double sl  = RoundPrice(ask - InpStopDist);
+      double tp  = (tpDist > 0) ? RoundPrice(ask + tpDist) : 0.0;
       ok = trade.Buy(lots, _Symbol, 0.0, sl, tp, cmt);
      }
    else
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double sl  = RoundPrice(bid + InpStopPoints * pt);
-      double tp  = (tpPts > 0) ? RoundPrice(bid - tpPts * pt) : 0.0;
+      double sl  = RoundPrice(bid + InpStopDist);
+      double tp  = (tpDist > 0) ? RoundPrice(bid - tpDist) : 0.0;
       ok = trade.Sell(lots, _Symbol, 0.0, sl, tp, cmt);
      }
 
@@ -390,10 +386,10 @@ bool CanStartCycle()
      }
 
    // spread
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(InpMaxSpreadPts > 0 && spread > InpMaxSpreadPts)
+   double spread = CurrentSpread();
+   if(InpMaxSpread > 0 && spread > InpMaxSpread)
      {
-      g_status = StringFormat("Spread too wide (%d)", (int)spread);
+      g_status = "Spread too wide (" + DoubleToString(spread, _Digits) + ")";
       return false;
      }
 
@@ -561,14 +557,20 @@ double RoundPrice(double price)
    return NormalizeDouble(price, _Digits);
   }
 
-// Account-currency value of a 1-point move for 1.0 lot.
-double ValuePerPointPerLot()
+// Account-currency value of a 1.0 price move for 1.0 lot.
+double ValuePerPriceUnitPerLot()
   {
    double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    if(ts <= 0)
       return 0.0;
-   return tv / ts * _Point;
+   return tv / ts;
+  }
+
+// Current spread in price units.
+double CurrentSpread()
+  {
+   return SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
   }
 
 void ResetDay()
@@ -589,8 +591,9 @@ void DrawPanel(bool hasPos, int posType, double posLots)
    s += StringFormat("Status: %s\n", g_status);
    s += StringFormat("Cycle active: %s   flips: %d/%d\n", g_cycleActive ? "yes" : "no", g_cycleFlips, InpMaxFlips);
    s += StringFormat("Cycle P/L (realised): %.2f\n", g_cyclePL);
-   s += StringFormat("Spread: %d pts   SL %d / TP %d pts", (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-                     InpStopPoints, InpTakeProfitPts);
+   s += "Spread: " + DoubleToString(CurrentSpread(), _Digits)
+      + "   SL " + DoubleToString(InpStopDist, _Digits)
+      + " / TP " + DoubleToString(InpTakeProfitDist, _Digits) + " (price units)";
    Comment(s);
   }
 //+------------------------------------------------------------------+

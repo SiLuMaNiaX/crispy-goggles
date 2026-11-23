@@ -6,7 +6,7 @@ stop-loss. `StopAndReverseEA.mq5` automates that pattern.
 
 ## How a cycle works
 
-1. **Entry**: a market BUY or SELL with SL `InpStopPoints` away and TP `InpTakeProfitPts` away.
+1. **Entry**: a market BUY or SELL with SL `InpStopDist` away and TP `InpTakeProfitDist` away.
 2. **Reverse order**: a SELL STOP (for a long) or BUY STOP (for a short) is placed at the SL price.
 3. **SL hit**: the position closes and the stop order opens the opposite trade, which gets its own SL and
    its own reverse order. This is one flip.
@@ -26,9 +26,11 @@ stop-loss. `StopAndReverseEA.mq5` automates that pattern.
 - `InpLots`, `InpLotMultiplier`, `InpMaxLots`: lot size per flip is `InpLots × multiplier^flip`, capped.
   The default multiplier of 1.0 keeps lots flat. 2.0 is a martingale and can wipe out an account.
 - `InpRecoverLosses`: widens the TP after each flip so one win covers the cycle's losses so far.
-- `InpMaxSpreadPts`, `InpStartHour`/`InpEndHour`, `InpMaxDailyLossPct`: filters that only block new cycles.
+- `InpMaxSpread`, `InpStartHour`/`InpEndHour`, `InpMaxDailyLossPct`: filters that only block new cycles.
 
-Points are the symbol's `_Point`. On a 2-digit gold quote (4342.46), 150 points = $1.50.
+All distances (`InpStopDist`, `InpTakeProfitDist`, `InpReverseOffset`, `InpMaxSpread`, `InpMaxSlippage`) are in
+**price units**, not points: 1.50 means a $1.50 move on gold whether the broker quotes 2 or 3 decimals
+(e.g. `XAUUSD` or a cent `XAUUSDc`). Defaults: SL 1.50, TP 2.00, max spread 0.40, max slippage 0.30.
 
 ## Install
 
