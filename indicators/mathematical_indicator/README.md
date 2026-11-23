@@ -69,3 +69,24 @@ Every variant loses. With the filters relaxed and all sessions enabled, 15m give
 ## Conclusion
 
 The strategy is carefully built and visually polished, but on gold it is **negative expectancy**. The losses come from the trigger itself, not from costs or one filter. Its on-chart record also scores fills more favourably than a real stop order can achieve.
+
+## MT5 EA (`MathematicalIndicatorEA.mq5`), built on request despite the results above
+
+It follows `research/mi.py` with `exec="ea"`, the realistic model that was backtested, using live ticks in place of 5m sub-bars:
+
+| When | What the EA does |
+|---|---|
+| Start-up | Replays the last 3,000 M15 bars, with no trading, to rebuild daily/4H/1H/M15 levels, clean zones and session state. |
+| Each closed M15 bar | Level feeds (break on close, merge, keep 3+1); clean-zone state machine; session-start story (2 candles → MIXED tie-break → weekly staircase); pre-session "ran" check; daily-level blocks; breakout search; setup cancels (closed back inside the range, 6-bar expiry); too-fast and 240-minute time exits. |
+| Each tick, setup working | Rubber-band check: price must first move ≥ 0.1 × ATR against the trade from the bar's open. If price reaches the trigger **before** any dip, the setup is cancelled. If it reaches it after one, the EA enters at market. |
+| Each tick, in a trade | At 1R: closes 50% and moves the stop to entry. Touching a nearer level also moves the stop to entry. The stop-loss and target sit on the server. |
+
+**Setup**
+- Attach the EA to XAUUSD; the timeframe is set by an input (M15 by default).
+- Set `Server GMT offset` and `Server adds +1h in US summer` to match your broker. The defaults fit typical GMT+2/+3 brokers, and the session windows depend on them.
+- Risk is 0.5% of equity to the stop by default. A trade is skipped if the minimum lot would exceed that.
+- The trade's management state is saved in terminal global variables, so a restart keeps managing an open trade.
+
+**Before relying on it**
+- **Not compiled here:** there's no MetaEditor in this environment. Compile it with F7.
+- **Expected result:** the backtest is negative (PF ~0.5). Use the Strategy Tester with real ticks, or demo only.
