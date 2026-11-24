@@ -2341,7 +2341,7 @@ string TickFlowContext(string sym)
    string s = "TICK-FLOW PROXY (counts of quote up-ticks vs down-ticks; NOT real exchange volume - weight lightly):\n";
    for(int w = 0; w < 3; w++)
      {
-      ulong start = to - (ulong)wins[w] * 60000;
+      long start = (long)to - (long)wins[w] * 60000;
       int up = 0, dn = 0;
       double firstMid = 0, lastMid = 0, prev = 0;
       for(int i = 0; i < n; i++)
@@ -2363,7 +2363,7 @@ string TickFlowContext(string sym)
    double prevMid = 0;
    for(int step = 1; step <= 6; step++)
      {
-      ulong edge = from + (ulong)step * 600000;
+      long edge = (long)from + (long)step * 600000;
       for(; j < n && t[j].time_msc <= edge; j++)
         {
          double mid = (t[j].bid + t[j].ask) / 2;
