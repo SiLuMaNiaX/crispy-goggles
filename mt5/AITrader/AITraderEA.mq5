@@ -18,6 +18,30 @@
 #include <Trade/Trade.mqh>
 #include "AITraderKeys.mqh"   // optional compiled-in API keys (never printed in logs)
 
+//+==================================================================+
+//| CHART VISUALS (chart symbol only)                                 |
+//|  key levels + Asian box + session lines, volume profile          |
+//|  histogram, news windows, AI decision markers, closed trades      |
+//+==================================================================+
+#define VIZ_PREFIX "AITraderViz_"
+#define VZ_PDHL    C'80,150,255'
+#define VZ_WEEK    C'170,110,255'
+#define VZ_OPEN    C'130,130,130'
+#define VZ_LDN     C'0,190,170'
+#define VZ_NY      C'255,150,60'
+#define VZ_ROUND   C'75,75,75'
+#define VZ_ASIA    C'20,28,46'
+#define VZ_POC     C'255,200,60'
+#define VZ_VA      C'60,100,160'
+#define VZ_VPOUT   C'40,48,66'
+#define VZ_NEWS    C'255,90,60'
+#define VZ_NEWSBG  C'45,18,18'
+
+datetime g_vizLast = 0;
+string   g_vizMarkers[];
+int      g_vizSeq = 0;
+
+
 // Dashboard panel
 #define PANEL_PREFIX "AITraderPanel_"
 #define CLR_PANEL_BG     C'16,20,28'
@@ -165,6 +189,15 @@ input bool             InpSelfReview      = true;                    // 7. Show 
 input int              InpSelfReviewTrades= 10;                      //    How many recent trades to show
 input datetime         InpStatsFrom       = 0;                       // 2. Performance stats from (0 = all history)
 
+input group "Chart visuals (chart symbol)"
+input bool             InpVizLevels       = true;                    // Key levels (PDH/PDL, week, session opens, round numbers)
+input bool             InpVizAsianBox     = true;                    // Asian range box
+input bool             InpVizProfile      = true;                    // Today's volume profile histogram (right side)
+input bool             InpVizNews         = true;                    // News lines + no-entry windows
+input bool             InpVizDecisions    = true;                    // AI decision markers (hover for the reason)
+input bool             InpVizTrades       = true;                    // Closed trades (entry -> exit, P/L)
+input int              InpVizMaxMarkers   = 150;                     // Max decision markers kept on the chart
+
 input group "Dashboard panel"
 input bool             InpShowPanel       = true;                    // Show dashboard panel
 input int              InpPanelX          = 8;                       // Panel X offset (px from left)
@@ -284,6 +317,7 @@ int OnInit()
    ArrayResize(g_syms, 0);
    g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
    g_newsLoaded = 0; g_tradesDirty = true; ArrayResize(g_news, 0); ArrayResize(g_trades, 0);
+   g_vizLast = 0; ArrayResize(g_vizMarkers, 0);
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
    AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
@@ -306,6 +340,7 @@ int OnInit()
    g_lastScanBar   = iTime(_Symbol, g_cfg.scanTF, 0); // first scan on the next bar
    g_lastManageBar = iTime(_Symbol, g_cfg.manageTF, 0);
    EventSetTimer(g_cfg.timerSec);
+   SetupChartForVisuals();
    PrintFormat("AITrader started: %s | %s session | %s | %d symbols | scan %s manage %s | risk %.2f%% | providers %s | dry run %s",
                ModeName(), SessionName(), ProfileName(), ArraySize(g_syms), TfName(g_cfg.scanTF), TfName(g_cfg.manageTF),
                g_cfg.riskPct, ProviderChain(), InpDryRun ? "ON" : "OFF");
@@ -322,6 +357,7 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_hE20[i]); IndicatorRelease(g_hE50[i]); IndicatorRelease(g_hE200[i]);
      }
    ObjectsDeleteAll(0, PANEL_PREFIX);
+   ObjectsDeleteAll(0, VIZ_PREFIX);
    Comment("");
   }
 
@@ -338,7 +374,9 @@ void OnTimer()
    // Algo Trading off (toolbar button, EA checkbox, or this copy was moved to the MQL5 VPS):
    // stay idle so a second copy does not spend API calls.
    LoadNews();
+   bool tradesChanged = g_tradesDirty;
    LoadTrades();
+   DrawVisuals(tradesChanged);
    if(!AlgoTradingOn()) { UpdateDashboard(); return; }
 
    // 1. Hard rules first (no AI needed)
@@ -1691,6 +1729,7 @@ void Notify(string msg)
 void LogRow(string stage, string sym, string action, double conf, double risk, double sl, double tp,
          double lots, string status, string reason)
   {
+   if(sym == _Symbol && (stage == "ENTRY" || stage == "MANAGE" || stage == "CLOSE")) DrawDecision(stage, action, status, conf, reason);
    int h = FileOpen(InpLogFile, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ, ',');
    if(h == INVALID_HANDLE) return;
    if(FileSize(h) == 0)
@@ -2334,4 +2373,273 @@ string TickFlowContext(string sym)
       path += StringFormat(" %+d", cum);
      }
    return s + path + "\n";
+  }
+
+//+==================================================================+
+//| CHART VISUALS (chart symbol only)                                 |
+//|  key levels + Asian box + session lines, volume profile          |
+//|  histogram, news windows, AI decision markers, closed trades      |
+//+==================================================================+
+void VzBase(string name)
+  {
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+  }
+
+void VzTrend(string id, datetime t1, double p1, datetime t2, double p2, color c, ENUM_LINE_STYLE st, int w, string tip)
+  {
+   string n = VIZ_PREFIX + id;
+   if(ObjectFind(0, n) < 0) { ObjectCreate(0, n, OBJ_TREND, 0, t1, p1, t2, p2); VzBase(n); }
+   ObjectMove(0, n, 0, t1, p1); ObjectMove(0, n, 1, t2, p2);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, n, OBJPROP_STYLE, st);
+   ObjectSetInteger(0, n, OBJPROP_WIDTH, w);
+   ObjectSetInteger(0, n, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, n, OBJPROP_BACK, true);
+   ObjectSetString(0, n, OBJPROP_TOOLTIP, tip);
+  }
+
+void VzText(string id, datetime t, double p, string txt, color c, ENUM_ANCHOR_POINT anchor, int size, string tip = "")
+  {
+   string n = VIZ_PREFIX + id;
+   if(ObjectFind(0, n) < 0) { ObjectCreate(0, n, OBJ_TEXT, 0, t, p); VzBase(n); }
+   ObjectMove(0, n, 0, t, p);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt);
+   ObjectSetString(0, n, OBJPROP_FONT, "Consolas");
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, size);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, n, OBJPROP_ANCHOR, anchor);
+   ObjectSetString(0, n, OBJPROP_TOOLTIP, tip == "" ? txt : tip);
+  }
+
+void VzRect(string id, datetime t1, double p1, datetime t2, double p2, color c, bool back, string tip)
+  {
+   string n = VIZ_PREFIX + id;
+   if(ObjectFind(0, n) < 0) { ObjectCreate(0, n, OBJ_RECTANGLE, 0, t1, p1, t2, p2); VzBase(n); }
+   ObjectMove(0, n, 0, t1, p1); ObjectMove(0, n, 1, t2, p2);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, n, OBJPROP_FILL, true);
+   ObjectSetInteger(0, n, OBJPROP_BACK, back);
+   ObjectSetString(0, n, OBJPROP_TOOLTIP, tip);
+  }
+
+void VzVLine(string id, datetime t, color c, string txt)
+  {
+   string n = VIZ_PREFIX + id;
+   if(ObjectFind(0, n) < 0) { ObjectCreate(0, n, OBJ_VLINE, 0, t, 0); VzBase(n); }
+   ObjectMove(0, n, 0, t, 0);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, n, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, n, OBJPROP_BACK, true);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt);
+   ObjectSetString(0, n, OBJPROP_TOOLTIP, txt);
+  }
+
+// A labelled horizontal level from t1 to just right of the last bar.
+void VzLevel(string id, datetime t1, double p, color c, ENUM_LINE_STYLE st, string label)
+  {
+   if(p <= 0) return;
+   datetime t2 = TimeCurrent() + PeriodSeconds() * 6;
+   string tip = label + " " + Px(_Symbol, p);
+   VzTrend("L_" + id, t1, p, t2, p, c, st, 1, tip);
+   VzText("LT_" + id, t2, p, " " + label + " " + Px(_Symbol, p), c, ANCHOR_LEFT, 7, tip);
+  }
+
+void DrawLevels()
+  {
+   string sym = _Symbol;
+   MqlRates d[]; ArraySetAsSeries(d, true);
+   if(CopyRates(sym, PERIOD_D1, 0, 2, d) != 2) return;
+   datetime today = d[0].time;
+   VzLevel("PDH", today, d[1].high, VZ_PDHL, STYLE_SOLID, "PDH");
+   VzLevel("PDL", today, d[1].low,  VZ_PDHL, STYLE_SOLID, "PDL");
+   VzLevel("PDC", today, d[1].close, VZ_OPEN, STYLE_DOT, "PDC");
+   VzLevel("DO",  today, d[0].open, VZ_OPEN, STYLE_DASH, "Day open");
+
+   MqlRates w[]; ArraySetAsSeries(w, true);
+   if(CopyRates(sym, PERIOD_W1, 0, 2, w) == 2)
+     {
+      VzLevel("PWH", w[0].time, w[1].high, VZ_WEEK, STYLE_DASH, "PWH");
+      VzLevel("PWL", w[0].time, w[1].low,  VZ_WEEK, STYLE_DASH, "PWL");
+      VzLevel("WO",  w[0].time, w[0].open, VZ_WEEK, STYLE_DOT,  "Week open");
+     }
+
+   // Asian range box + session opens (DST-aware)
+   datetime gmt = TimeGMT(), now = TimeTradeServer();
+   datetime gm0 = (datetime)((long)gmt - (long)gmt % 86400);
+   datetime aFrom = GmtToServer(gm0), aTo = GmtToServer(gm0 + 8 * 3600);
+   if(InpVizAsianBox && now > aFrom)
+     {
+      MqlRates a[];
+      int n = CopyRates(sym, PERIOD_M5, aFrom, now < aTo ? now : aTo, a);
+      if(n > 0)
+        {
+         double hi = a[0].high, lo = a[0].low;
+         for(int i = 1; i < n; i++) { hi = MathMax(hi, a[i].high); lo = MathMin(lo, a[i].low); }
+         string tip = StringFormat("Asian range %s - %s", Px(sym, lo), Px(sym, hi));
+         VzRect("ASIA", aFrom, hi, aTo, lo, VZ_ASIA, true, tip);
+         VzText("ASIAT", aFrom, hi, "Asian range", C'90,110,150', ANCHOR_LEFT_LOWER, 7, tip);
+        }
+     }
+   datetime lon = GmtToServer(gm0 + (8 * 60 - LondonOffsetMin(gmt)) * 60);
+   datetime ny  = GmtToServer(gm0 + (8 * 60 - NewYorkOffsetMin(gmt)) * 60);
+   VzVLine("V_LDN", lon, VZ_LDN, "London open 08:00 local");
+   VzVLine("V_NY",  ny,  VZ_NY,  "New York open 08:00 local");
+   if(now > lon) VzLevel("LDNO", lon, iOpen(sym, PERIOD_M5, iBarShift(sym, PERIOD_M5, lon)), VZ_LDN, STYLE_DASH, "LDN open");
+   if(now > ny)  VzLevel("NYO",  ny,  iOpen(sym, PERIOD_M5, iBarShift(sym, PERIOD_M5, ny)),  VZ_NY,  STYLE_DASH, "NY open");
+
+   // nearest major round numbers
+   double px = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(px > 0)
+     {
+      double major = MathPow(10, MathFloor(MathLog10(px)) - 2) * 5;
+      double below = MathFloor(px / major) * major;
+      VzLevel("RN1", today, below, VZ_ROUND, STYLE_DOT, "");
+      VzLevel("RN2", today, below + major, VZ_ROUND, STYLE_DOT, "");
+     }
+  }
+
+// Today's volume profile as a histogram in the empty space right of price.
+void DrawProfile()
+  {
+   ObjectsDeleteAll(0, VIZ_PREFIX + "VP");
+   string sym = _Symbol;
+   MqlRates d[]; ArraySetAsSeries(d, true);
+   if(CopyRates(sym, PERIOD_D1, 0, 1, d) != 1) return;
+   MqlRates r[];
+   int n = CopyRates(sym, PERIOD_M1, d[0].time, TimeTradeServer(), r);
+   if(n < 30) return;
+   double lo = r[0].low, hi = r[0].high;
+   for(int i = 1; i < n; i++) { lo = MathMin(lo, r[i].low); hi = MathMax(hi, r[i].high); }
+   int rows = 48;
+   double bin = (hi - lo) / rows;
+   if(bin <= 0) return;
+   double v[]; ArrayResize(v, rows); ArrayInitialize(v, 0);
+   double total = 0;
+   for(int i = 0; i < n; i++)
+     {
+      int a = (int)MathMax(0, MathMin(rows - 1, (int)((r[i].low - lo) / bin)));
+      int b = (int)MathMax(a, MathMin(rows - 1, (int)((r[i].high - lo) / bin)));
+      double per = (double)r[i].tick_volume / (b - a + 1);
+      for(int k = a; k <= b; k++) v[k] += per;
+      total += (double)r[i].tick_volume;
+     }
+   int p = 0;
+   for(int k = 1; k < rows; k++) if(v[k] > v[p]) p = k;
+   int lo_i = p, hi_i = p;
+   double acc = v[p];
+   while(acc < 0.7 * total)
+     {
+      double up = hi_i + 1 < rows ? v[hi_i + 1] : -1, dn = lo_i - 1 >= 0 ? v[lo_i - 1] : -1;
+      if(up < 0 && dn < 0) break;
+      if(up >= dn) { hi_i++; acc += up; } else { lo_i--; acc += dn; }
+     }
+   datetime x0 = TimeCurrent() + PeriodSeconds() * 3;
+   int maxBars = 28;
+   for(int k = 0; k < rows; k++)
+     {
+      if(v[k] <= 0) continue;
+      datetime x1 = (datetime)((long)x0 + (long)MathMax(1, (int)(v[k] / v[p] * maxBars)) * PeriodSeconds());
+      color c = (k == p) ? VZ_POC : (k >= lo_i && k <= hi_i ? VZ_VA : VZ_VPOUT);
+      VzRect("VP" + IntegerToString(k), x0, lo + k * bin, x1, lo + (k + 1) * bin - bin * 0.15, c, false,
+             StringFormat("%s - %s  volume %.0f", Px(sym, lo + k * bin), Px(sym, lo + (k + 1) * bin), v[k]));
+     }
+   double poc = lo + (p + 0.5) * bin, vah = lo + (hi_i + 1) * bin, val = lo + lo_i * bin;
+   datetime xl = (datetime)((long)x0 + (long)(maxBars + 1) * PeriodSeconds());
+   VzText("VPT_POC", xl, poc, "POC " + Px(sym, poc), VZ_POC, ANCHOR_LEFT, 7);
+   VzText("VPT_VAH", xl, vah, "VAH " + Px(sym, vah), C'110,150,210', ANCHOR_LEFT, 7);
+   VzText("VPT_VAL", xl, val, "VAL " + Px(sym, val), C'110,150,210', ANCHOR_LEFT, 7);
+   VzText("VPT_T", x0, hi, "Today's volume profile", C'110,120,140', ANCHOR_LEFT_LOWER, 7);
+  }
+
+void DrawNewsMarks()
+  {
+   ObjectsDeleteAll(0, VIZ_PREFIX + "N");
+   if(!InpNewsFilter) return;
+   datetime now = TimeTradeServer();
+   double px = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   for(int i = 0; i < ArraySize(g_news); i++)
+     {
+      long rel = ((long)g_news[i].t - (long)now) / 60;
+      if(rel < -6 * 60 || rel > 24 * 60) continue;
+      string txt = g_news[i].cur + " " + g_news[i].name;
+      VzRect("NW" + IntegerToString(i), g_news[i].t - InpNewsBeforeMin * 60, px * 3,
+             g_news[i].t + InpNewsAfterMin * 60, 0, VZ_NEWSBG, true, "No new entries: " + txt);
+      VzVLine("NL" + IntegerToString(i), g_news[i].t, VZ_NEWS, txt + " " + TimeToString(g_news[i].t, TIME_MINUTES));
+     }
+  }
+
+void DrawTrades()
+  {
+   ObjectsDeleteAll(0, VIZ_PREFIX + "T");
+   int total = ArraySize(g_trades), shown = 0;
+   for(int i = total - 1; i >= 0 && shown < 40; i--)
+     {
+      ClosedTrade c = g_trades[i];
+      if(c.sym != _Symbol) continue;
+      shown++;
+      color col = c.net >= 0 ? C'60,200,120' : C'240,80,80';
+      string tip = StringFormat("%s %.2f lots | %s -> %s | %+.2f %s (%+.2fR) | %s", c.dir > 0 ? "BUY" : "SELL", c.volume,
+                                Px(c.sym, c.openPrice), Px(c.sym, c.closePrice), c.net, AccountInfoString(ACCOUNT_CURRENCY),
+                                c.rMult, c.exitReason);
+      string id = IntegerToString((long)c.posId);
+      VzTrend("TL" + id, c.openTime, c.openPrice, c.closeTime, c.closePrice, col, STYLE_DOT, 2, tip);
+      VzText("TT" + id, c.closeTime, c.closePrice, StringFormat(" %+.2f", c.net), col, ANCHOR_LEFT, 8, tip);
+     }
+  }
+
+// Marker for each AI decision on the chart symbol (called from LogRow).
+void DrawDecision(string stage, string action, string status, double conf, string reason)
+  {
+   if(!InpVizDecisions) return;
+   double px = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int idx = SymbolIndex(_Symbol);
+   double off = idx >= 0 ? Buf(g_hATR[idx]) * 0.4 : 0;
+   int code; color c; double y; ENUM_ARROW_ANCHOR anc = ANCHOR_TOP;
+   bool rejected = StringFind(status, "REJECTED") == 0 || StringFind(status, "IGNORED") == 0;
+   if(stage == "ENTRY" && action == "BUY" && !rejected)       { code = 233; c = C'60,200,120'; y = px - off; anc = ANCHOR_TOP; }
+   else if(stage == "ENTRY" && action == "SELL" && !rejected) { code = 234; c = C'240,80,80';  y = px + off; anc = ANCHOR_BOTTOM; }
+   else if(rejected)                                          { code = 251; c = C'255,190,60'; y = px + off; anc = ANCHOR_BOTTOM; }
+   else if(stage == "ENTRY")                                  { code = 159; c = C'120,130,150'; y = px + off; anc = ANCHOR_BOTTOM; }
+   else                                                       { code = 115; c = C'0,190,255';  y = px - off; anc = ANCHOR_TOP; }
+   string n = VIZ_PREFIX + "D" + IntegerToString(++g_vizSeq) + "_" + IntegerToString((long)TimeCurrent());
+   if(!ObjectCreate(0, n, OBJ_ARROW, 0, TimeCurrent(), y)) return;
+   VzBase(n);
+   ObjectSetInteger(0, n, OBJPROP_ARROWCODE, code);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, n, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, n, OBJPROP_ANCHOR, anc);
+   string tip = StringFormat("%s %s %s %s conf %.2f: %s", TimeToString(TimeCurrent(), TIME_MINUTES), stage, action,
+                             status, conf, reason);
+   ObjectSetString(0, n, OBJPROP_TOOLTIP, StringSubstr(tip, 0, 250));
+   int k = ArraySize(g_vizMarkers);
+   ArrayResize(g_vizMarkers, k + 1);
+   g_vizMarkers[k] = n;
+   if(ArraySize(g_vizMarkers) > InpVizMaxMarkers)
+     {
+      ObjectDelete(0, g_vizMarkers[0]);
+      ArrayRemove(g_vizMarkers, 0, 1);
+     }
+   ChartRedraw(0);
+  }
+
+void DrawVisuals(bool force)
+  {
+   if(!force && g_vizLast != 0 && TimeCurrent() - g_vizLast < 30) return;
+   g_vizLast = TimeCurrent();
+   if(InpVizLevels)  DrawLevels();
+   if(InpVizProfile) DrawProfile();
+   if(InpVizNews)    DrawNewsMarks();
+   if(InpVizTrades)  DrawTrades();
+   ChartRedraw(0);
+  }
+
+void SetupChartForVisuals()
+  {
+   if(InpVizProfile)
+     {
+      ChartSetInteger(0, CHART_SHIFT, true);     // room on the right for the profile histogram
+      ChartSetDouble(0, CHART_SHIFT_SIZE, 25);
+     }
+   ChartSetInteger(0, CHART_SHOW_TRADE_LEVELS, true); // SL/TP lines of open positions
   }

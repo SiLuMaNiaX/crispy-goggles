@@ -155,6 +155,19 @@ The default watchlist is `XAUUSD`. When **2 or fewer** symbols pass the spread f
 
 Sections 3–6 are also sent to the position manager. Every section can be switched off. More context makes each AI request larger and a little more expensive, and asAi takes slightly longer to reply.
 
+## Chart visuals
+
+These are drawn on the chart the EA is attached to, using the same data the AI receives:
+
+- **Key levels:** previous day high/low (blue), previous day close and day open (grey), previous week high/low and week open (purple), London and New York open lines and prices (teal and orange, DST-aware), and nearest round numbers.
+- **Asian range** as a shaded box.
+- **Today's volume profile** as a histogram in the space right of price: POC in gold, value area in blue. The EA turns on chart shift to make room for it.
+- **News:** red lines at high-impact events, with a shaded no-entry window around each.
+- **AI decision markers:** ▲ BUY / ▼ SELL proposals, ● HOLD, ✕ rejected or ignored, ◆ management actions. **Hover over a marker to read the AI's reason.**
+- **Closed trades:** dotted line from entry to exit, green or red, with P/L. Hover for details (R, exit reason).
+
+Each layer can be switched off under *Chart visuals*. All objects are removed when the EA is removed.
+
 ## API keys: where to put them
 
 | Where | Works on | Shown in logs? |
