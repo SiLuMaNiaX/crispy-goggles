@@ -153,7 +153,7 @@ input bool             InpShowPanel       = true;                    // Show das
 input int              InpPanelX          = 8;                       // Panel X offset (px from left)
 input int              InpPanelY          = 100;                     // Panel Y offset (px from top; clears one-click trading)
 input int              InpPanelFontSize   = 9;                       // Panel font size
-input int              InpPanelWrapChars  = 80;                      // Wrap long lines after N characters
+input int              InpPanelWrapChars  = 63;                      // Wrap long lines after N characters (MT5 max 63)
 
 //=== Types ===========================================================
 struct EntryDecision
@@ -1625,7 +1625,7 @@ void PanelAdd(string text, color c)
   {
    int n = ArraySize(g_pTxt);
    ArrayResize(g_pTxt, n + 1); ArrayResize(g_pClr, n + 1);
-   g_pTxt[n] = text; g_pClr[n] = c;
+   g_pTxt[n] = StringSubstr(text, 0, 63); g_pClr[n] = c; // OBJ_LABEL limit
   }
 
 // Adds 'text' under a short heading, wrapping long text onto indented lines.
@@ -1633,7 +1633,7 @@ void PanelAddWrapped(string head, string text, color c)
   {
    string pad = "            ";
    string prefix = StringSubstr(head + pad, 0, 11) + " ";
-   int width = MathMax(30, InpPanelWrapChars - 12);
+   int width = MathMax(30, MathMin(InpPanelWrapChars, 63) - 12); // OBJ_LABEL text is cut at 63 chars
    while(StringLen(text) > width)
      {
       int cut = width;
@@ -1700,7 +1700,8 @@ void DrawPanel()
 
    // keep the whole panel inside the chart window
    int chartH = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
-   int y = InpPanelY;
+   int x = (int)MathRound(InpPanelX * dpi / 96.0);
+   int y = (int)MathRound(InpPanelY * dpi / 96.0);
    if(chartH > 0 && y + panelH > chartH) y = MathMax(0, chartH - panelH - 4);
 
    string bg = PANEL_PREFIX + "bg";
@@ -1713,7 +1714,7 @@ void DrawPanel()
       ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
      }
-   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, InpPanelX);
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, bg, OBJPROP_XSIZE, maxW + 2 * pad);
    ObjectSetInteger(0, bg, OBJPROP_YSIZE, panelH);
@@ -1734,7 +1735,7 @@ void DrawPanel()
          ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
         }
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpPanelFontSize);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + pad);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x + pad);
       ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + pad + i * lineH);
       ObjectSetInteger(0, name, OBJPROP_COLOR, g_pClr[i]);
       ObjectSetString(0, name, OBJPROP_TEXT, g_pTxt[i] == "" ? " " : g_pTxt[i]);
