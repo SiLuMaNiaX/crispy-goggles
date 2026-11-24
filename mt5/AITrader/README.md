@@ -18,10 +18,10 @@ Each AI call tries the providers in this order:
 
 | Stage | Runs on (default) | Why |
 |---|---|---|
-| SCAN (each H1 bar) | **DeepSeek** | Runs often and ranks a table; a cheap, fast model is enough |
+| SCAN (each new bar of the mode's scan timeframe) | **DeepSeek** | Runs often and ranks a table; a cheap, fast model is enough |
 | ENTRY | **asAi** (primary) | The decision that commits money; give it your strongest model |
 | ENTRY second opinion | **the next provider that is not the one that answered** (usually DeepSeek or OpenRouter) | An independent check, so one model cannot open a trade on its own |
-| MANAGE (each M15 bar, per position) | **DeepSeek** | High volume; HOLD is the usual answer |
+| MANAGE (each new bar of the mode's manage timeframe, per position) | **DeepSeek** | High volume; HOLD is the usual answer |
 
 Each stage still fails over to the other providers when its first choice is down. You can change the routing in *Multi-model routing*.
 
@@ -36,7 +36,7 @@ Each trade with consensus costs 2 entry calls. For the most independent second o
 - The dashboard shows the chain (`asAi > DeepSeek > OpenRouter`, with `(down)` next to any provider that is being skipped) and which provider/model answered last.
 
 ```
- every new bar of the scan timeframe (H1 by default)
+ every new bar of the scan timeframe (set by the trading mode)
  ┌──────────────┐   1 AI call   ┌──────────────────┐  1 AI call per pick  ┌─────────────────┐
  │ 1. SCAN      │ ────────────► │ 2. ENTRY         │ ───────────────────► │ hard-limit check │ ──► order
  │ indicators   │   AI picks    │ full context per │  BUY/SELL/HOLD,      │ risk cap, SL/ATR,│     (or DRY-RUN log)
@@ -44,7 +44,7 @@ Each trade with consensus costs 2 entry calls. For the most independent second o
  │ symbol       │   + bias      │ open positions   │                      │ portfolio risk   │
  └──────────────┘               └──────────────────┘                      └─────────────────┘
 
- every new bar of the manage timeframe (M15 by default), for each open position
+ every new bar of the manage timeframe (set by the trading mode), for each open position
  ┌──────────────────┐  1 AI call  ┌──────────────────────────────────┐
  │ 3. MANAGE        │ ──────────► │ HOLD / CLOSE / PARTIAL / MODIFY   │ ──► validated: the SL can only tighten,
  │ position + bars  │             │ (+ new SL / TP / close fraction)  │     TP must be valid, lot split must be valid
@@ -53,6 +53,76 @@ Each trade with consensus costs 2 entry calls. For the most independent second o
  every timer tick (15 s), no AI involved
  4. HARD CLOSES: daily loss limit → close all and halt · max hold time · Friday close
 ```
+
+## Strategy profile: trading mode, session bias and risk profile
+
+Three selectors at the top of the inputs control how the EA trades. Each one changes the EA's hard limits **and** is described to the AI at the start of every request, so the scan, entry and management stages all work to the same style.
+
+### 1. Trading mode
+
+| Mode | Scan TF | Manage TF | SL distance | Min R:R | Max hold | Max spread | Trades/day | Timer | AI calls/day |
+|---|---|---|---|---|---|---|---|---|---|
+| **Superscalping** | M1 | M1 | 0.5–1.5 ATR | 1.0 | 30 min | 0.30 ATR | 30 | 3 s | 1500 |
+| **Scalping** | M5 | M1 | 0.6–2.0 ATR | 1.2 | 3 h | 0.20 ATR | 15 | 5 s | 600 |
+| **Intraday** (default) | M15 | M5 | 0.7–2.5 ATR | 1.5 | 12 h, flat at session end | 0.15 ATR | 6 | 10 s | 300 |
+| **Swing** | H4 | H1 | 1.0–3.5 ATR | 2.0 | 10 days | 0.10 ATR | 3 | 30 s | 80 |
+| **Custom** | your inputs | your inputs | your inputs | your inputs | your inputs | your inputs | your inputs | 15 s | 150 |
+
+- In every mode except Swing, positions are **closed when the selected session ends** (*Non-swing modes: close positions when the session ends*).
+- Swing can hold over the weekend (*Swing mode: allow holding over the weekend*). The other modes close on Friday at *Friday close hour*.
+- *AI calls/day* and *Timer* are the mode's defaults. Set the inputs to a value above 0 to override them.
+- Inputs marked **[Custom]** apply only when the mode is Custom.
+- **Superscalping caveat:** an AI reply takes about 2–20 s, and with entry consensus each trade needs two replies. On M1 that delay is a large part of the trade's life. The EA re-reads the live price and re-checks the stop-loss and take-profit before sending, so stale signals are rejected rather than filled badly. Even so, superscalping depends on very low spreads and fast AI responses, and it uses the most API calls. Test it in dry run first.
+
+### 2. Session bias (times in GMT)
+
+| Session | Window | What the AI is told |
+|---|---|---|
+| No session bias | *Entries from/until* inputs (server time) | Trade any liquid hour |
+| Asian | 00–08 | Range-bound; favour JPY/AUD/NZD and XAU; fade extremes |
+| London | 07–16 | Highest volume; EUR/GBP/CHF/XAU; London-open breakouts of the Asian range |
+| New York | 12–21 | USD pairs, XAU, indices; US data spikes 12:30–14:00 |
+| London-NY | 07–21 | Most liquid hours; strongest moves in the 12–16 overlap |
+| Asian-London | 00–16 | The Asian range forms, then London often breaks it |
+| NY-Asian | 12–08 (overnight) | NY momentum, then quieter Asia; avoid the 21–23 rollover |
+
+New entries are only allowed inside the window, and the window also sets when the session-end close happens. The windows are fixed in GMT, so they don't follow daylight-saving changes; shift them by an hour if you need to.
+
+### 3. Risk profile
+
+The Balanced profile uses your inputs as set. The other profiles adjust them:
+
+| Profile | Risk/trade | Min confidence | Min R:R | Max positions | Trades/day | Candidates | Entry consensus | AI behaviour |
+|---|---|---|---|---|---|---|---|---|
+| **Passive** | × 0.5 | ≥ 0.80 | +0.5 | 1 | × 0.34 | 1 (score ≥ 0.75) | required; trade skipped if no 2nd model | Only A+ setups; hands-off management, intervenes only on invalidation |
+| **Conservative** (default) | × 0.75 | ≥ 0.72 | +0.3 | ≤ 2 | × 0.6 | score ≥ 0.70 | required | Capital first; trend-aligned only; early partial profits and breakeven |
+| **Balanced** | × 1.0 | input (0.65) | mode value | input (3) | mode value | input | input | Clear setups, risk sized to setup quality |
+| **Aggressive** | × 1.5 | ≤ 0.60 | −0.3 (min 1.0) | +2 | × 1.5 | +1, score ≥ 0.55 | input | More setups including breakouts and fades; lets winners run; never averages down |
+
+**These limits apply under every profile:** *Absolute ceiling per trade* (2% by default), *Max total open risk* (3%) and the daily loss limit (3%). For example, Aggressive allows 5 positions at 1.5% each, but the 3% total-risk cap means only about 2 of them can be open at full risk.
+
+#### Effective settings with default inputs
+
+| Mode | Profile | Risk/trade | Min conf | Min R:R | Max positions | Trades/day |
+|---|---|---|---|---|---|---|
+| Superscalping | Passive | 0.50% | 0.80 | 1.5 | 1 | 10 |
+| Superscalping | Conservative | 0.75% | 0.72 | 1.3 | 2 | 18 |
+| Superscalping | Balanced | 1.00% | 0.65 | 1.0 | 3 | 30 |
+| Superscalping | Aggressive | 1.50% | 0.60 | 1.0 | 5 | 45 |
+| Scalping | Passive | 0.50% | 0.80 | 1.7 | 1 | 5 |
+| Scalping | Conservative | 0.75% | 0.72 | 1.5 | 2 | 9 |
+| Scalping | Balanced | 1.00% | 0.65 | 1.2 | 3 | 15 |
+| Scalping | Aggressive | 1.50% | 0.60 | 1.0 | 5 | 22 |
+| Intraday | Passive | 0.50% | 0.80 | 2.0 | 1 | 2 |
+| Intraday | Conservative | 0.75% | 0.72 | 1.8 | 2 | 4 |
+| Intraday | Balanced | 1.00% | 0.65 | 1.5 | 3 | 6 |
+| Intraday | Aggressive | 1.50% | 0.60 | 1.2 | 5 | 9 |
+| Swing | Passive | 0.50% | 0.80 | 2.5 | 1 | 1 |
+| Swing | Conservative | 0.75% | 0.72 | 2.3 | 2 | 2 |
+| Swing | Balanced | 1.00% | 0.65 | 2.0 | 3 | 3 |
+| Swing | Aggressive | 1.50% | 0.60 | 1.7 | 5 | 4 |
+
+The chart dashboard shows the active mode, session (open or closed), profile and the effective risk settings.
 
 ## What the AI decides and what the EA enforces
 
@@ -84,33 +154,30 @@ The chart shows a live dashboard: mode, day P/L, open risk, positions, AI calls 
 - **asAi**: any model listed on its Models page. Your asAi dashboard says keys have **no spending limit**, so create a separate asAi key just for this EA. That way you can revoke it on its own, and *Max AI calls per day* is your only spending cap. If asAi rejects requests with HTTP 400, its proxy may not accept `response_format`: set *Request JSON response_format* to false.
 - **DeepSeek direct**: `deepseek-chat`. It's cheap and fast, and supports JSON mode.
 - **OpenRouter**: one key for many models. Set *Default model* to any slug from openrouter.ai/models. You can also use a cheaper model for SCAN and MANAGE (which run often) and a stronger one for ENTRY (which runs rarely), via *Model for SCAN / ENTRY / MANAGE*.
-- Expected number of calls per day with the defaults (H1 scan, M15 manage, 20 trading hours):
-  - about 20 scan calls
-  - up to 2 entry calls per scan
-  - up to 4 manage calls per hour for each open position
-
-  The hard cap is *Max AI calls per day* (150 by default).
+- Calls per day depend mostly on the trading mode. See *AI calls/day* in the trading mode table; that number is also the hard cap.
+  - Each new scan bar costs 1 scan call, plus up to 2 entry calls (with consensus) for each candidate.
+  - Each manage bar costs 1 call for each open position.
+  - Swing uses the fewest calls and Superscalping the most. Routing scan and manage to a cheap model, as in the defaults, keeps the cost down.
 - Reasoning models (such as `deepseek-reasoner` and other models that "think") are slow and sometimes ignore JSON mode. If you see `PARSE_ERROR` in the log, set *Request JSON response_format* to false or switch models.
 
 ## Key inputs
 
 | Group | Input | Default |
 |---|---|---|
+| Strategy profile | Trading mode / Session bias / Risk profile | **Intraday / No session bias / Conservative** |
+| | Close positions when the session ends (non-swing modes) | true |
 | Scanner | Watchlist | XAUUSD, EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, XAGUSD |
-| | Scan/entry timeframe | H1 |
-| | Max candidates per scan / min score | 2 / 0.6 |
-| | Entry hours (server time) | 01–21 |
-| Management | Manage timeframe | M15 |
-| | Min manage confidence | 0.6 |
-| | Max hold hours / Friday close hour | 48 / 20 |
+| | [Balanced] Max candidates per scan / min score | 2 / 0.6 |
+| | [No session bias] Entry hours (server time) | 01–21 |
+| Management | [Balanced] Min manage confidence | 0.6 |
+| | Friday close hour / swing may hold over the weekend | 20 / true |
 | | Mechanical breakeven at R | 0 (left to the AI) |
 | Hard limits | **Dry run** | **true** |
-| | Max risk per trade / total open risk | 1% / 3% |
-| | Min entry confidence / min R:R | 0.65 / 1.5 |
-| | SL distance | 0.5–3.0 × ATR |
-| | Max positions / trades per day | 3 / 6 |
+| | [Balanced] Risk per trade / absolute ceiling / total open risk | 1% / 2% / 3% |
+| | [Balanced] Min entry confidence | 0.65 |
+| | [Balanced] Max positions | 3 |
 | | Daily loss limit / close all when hit | 3% / true |
-| | Max spread (fraction of ATR) | 0.15 |
+| Custom mode | Timeframes, bars, SL ATR range, R:R, hold hours, spread, trades/day | used only when Trading mode = Custom |
 
 ## Limitations
 

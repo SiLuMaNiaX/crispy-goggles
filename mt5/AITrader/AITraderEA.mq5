@@ -24,7 +24,41 @@ enum ENUM_AI_ROUTE
    ROUTE_OPENROUTER = 2  // OpenRouter first
   };
 
+enum ENUM_TRADE_MODE
+  {
+   MODE_SUPERSCALP = 0, // Superscalping (M1, minutes)
+   MODE_SCALP      = 1, // Scalping (M5, < 3 h)
+   MODE_INTRADAY   = 2, // Intraday (M15, same day)
+   MODE_SWING      = 3, // Swing (H4, days)
+   MODE_CUSTOM     = 4  // Custom (use the "Custom mode" inputs)
+  };
+
+enum ENUM_SESSION_BIAS
+  {
+   SESSION_NONE         = 0, // No session bias (server-hour window)
+   SESSION_ASIAN        = 1, // Asian      00-08 GMT
+   SESSION_LONDON       = 2, // London     07-16 GMT
+   SESSION_NY           = 3, // New York   12-21 GMT
+   SESSION_LONDON_NY    = 4, // London + NY 07-21 GMT (overlap 12-16)
+   SESSION_ASIAN_LONDON = 5, // Asian + London 00-16 GMT
+   SESSION_NY_ASIAN     = 6  // NY + Asian 12-08 GMT (overnight)
+  };
+
+enum ENUM_RISK_PROFILE
+  {
+   PROFILE_PASSIVE      = 0, // Passive (A+ setups only, hands-off)
+   PROFILE_CONSERVATIVE = 1, // Conservative (capital first)
+   PROFILE_BALANCED     = 2, // Balanced (inputs as set)
+   PROFILE_AGGRESSIVE   = 3  // Aggressive (more trades, more risk)
+  };
+
 //=== Inputs ==========================================================
+input group "STRATEGY PROFILE"
+input ENUM_TRADE_MODE   InpTradeMode      = MODE_INTRADAY;           // Trading mode
+input ENUM_SESSION_BIAS InpSession        = SESSION_NONE;            // Session bias
+input ENUM_RISK_PROFILE InpRiskProfile    = PROFILE_CONSERVATIVE;    // Risk profile
+input bool              InpCloseAtSessionEnd = true;                 // Non-swing modes: close positions when the session ends
+
 // Providers are tried in order: Primary (asAi) -> Backup 1 (DeepSeek) -> Backup 2 (OpenRouter).
 // A provider that fails is skipped for InpFailoverCooldownMin minutes.
 input group "AI provider 1 - PRIMARY (asAi, OpenAI-compatible)"
@@ -54,7 +88,7 @@ input group "Multi-model routing"
 input ENUM_AI_ROUTE    InpRouteScan       = ROUTE_DEEPSEEK;          // SCAN runs on (others = failover)
 input ENUM_AI_ROUTE    InpRouteEntry      = ROUTE_PRIMARY;           // ENTRY runs on (others = failover)
 input ENUM_AI_ROUTE    InpRouteManage     = ROUTE_DEEPSEEK;          // MANAGE runs on (others = failover)
-input bool             InpEntryConsensus  = true;                    // ENTRY needs a 2nd model (different provider) to agree
+input bool             InpEntryConsensus  = true;                    // [Balanced/Aggressive] ENTRY needs a 2nd model to agree
 input bool             InpConsensusStrict = false;                   // If no 2nd provider is available: true = skip trade
 
 input group "AI request settings"
@@ -63,42 +97,44 @@ input double           InpTemperature     = 0.2;                     // Temperat
 input int              InpMaxTokens       = 600;                     // Max response tokens
 input bool             InpJsonMode        = true;                    // Request JSON response_format
 input int              InpTimeoutMs       = 45000;                   // HTTP timeout per provider (ms)
-input int              InpMaxAICallsDay   = 150;                     // Max AI calls per day (all stages)
+input int              InpMaxAICallsDay   = 0;                       // Max AI calls per day (0 = mode default)
 
 input group "Scanner"
 input string           InpSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,XAGUSD"; // Watchlist (broker names, comma separated)
-input ENUM_TIMEFRAMES  InpTimeframe       = PERIOD_H1;               // Scan/entry timeframe (runs on each new bar)
-input int              InpMaxCandidates   = 2;                       // Max candidates AI may pick per scan
-input double           InpMinScanScore    = 0.6;                     // Min scan score to analyse a candidate
-input int              InpBarsForAI       = 40;                      // Bars sent per symbol for entry/manage
-input int              InpStartHour       = 1;                       // New entries from (server hour)
-input int              InpEndHour         = 21;                      // New entries until (server hour, exclusive)
+input ENUM_TIMEFRAMES  InpTimeframe       = PERIOD_H1;               // [Custom] Scan/entry timeframe
+input int              InpMaxCandidates   = 2;                       // [Balanced] Max candidates per scan
+input double           InpMinScanScore    = 0.6;                     // [Balanced] Min scan score
+input int              InpBarsForAI       = 40;                      // [Custom] Bars sent per symbol
+input int              InpStartHour       = 1;                       // [No session bias] Entries from (server hour)
+input int              InpEndHour         = 21;                      // [No session bias] Entries until (server hour)
 
 input group "Position management"
-input ENUM_TIMEFRAMES  InpManageTF        = PERIOD_M15;              // AI reviews open positions on each new bar of
-input double           InpMinManageConf   = 0.6;                     // Min AI confidence to act on a management call
+input ENUM_TIMEFRAMES  InpManageTF        = PERIOD_M15;              // [Custom] Manage timeframe
+input double           InpMinManageConf   = 0.6;                     // [Balanced] Min AI confidence for management
 input double           InpBreakevenR      = 0.0;                     // Mechanical breakeven at R (0 = leave to AI)
-input int              InpMaxHoldHours    = 48;                      // Hard close after N hours (0 = off)
+input int              InpMaxHoldHours    = 48;                      // [Custom] Hard close after N hours (0 = off)
 input int              InpFridayCloseHour = 20;                      // Friday: close all & stop from this hour (0 = off)
+input bool             InpSwingHoldWeekend= true;                    // Swing mode: allow holding over the weekend
 
 input group "Hard risk limits (AI cannot override)"
 input bool             InpDryRun          = true;                    // Dry run: log only, send NO orders
-input double           InpMaxRiskPct      = 1.0;                     // Max risk per trade (% equity)
+input double           InpMaxRiskPct      = 1.0;                     // [Balanced] Risk per trade (% equity)
+input double           InpRiskCeilingPct  = 2.0;                     // Absolute ceiling per trade, any profile (%)
 input double           InpMaxTotalRiskPct = 3.0;                     // Max total open risk (% equity)
-input double           InpMinConfidence   = 0.65;                    // Min AI confidence to enter
-input double           InpMinRR           = 1.5;                     // Min reward:risk at entry
-input double           InpMinSlAtr        = 0.5;                     // Min SL distance (x ATR)
-input double           InpMaxSlAtr        = 3.0;                     // Max SL distance (x ATR)
-input int              InpMaxPositions    = 3;                       // Max open positions (all symbols)
-input int              InpMaxTradesDay    = 6;                       // Max new trades per day
+input double           InpMinConfidence   = 0.65;                    // [Balanced] Min AI confidence to enter
+input double           InpMinRR           = 1.5;                     // [Custom] Min reward:risk at entry
+input double           InpMinSlAtr        = 0.5;                     // [Custom] Min SL distance (x ATR)
+input double           InpMaxSlAtr        = 3.0;                     // [Custom] Max SL distance (x ATR)
+input int              InpMaxPositions    = 3;                       // [Balanced] Max open positions
+input int              InpMaxTradesDay    = 6;                       // [Custom] Max new trades per day
 input double           InpMaxDailyLossPct = 3.0;                     // Daily equity drawdown limit (%)
 input bool             InpCloseOnDailyLoss= true;                    // Close all positions when daily limit hit
-input double           InpMaxSpreadAtr    = 0.15;                    // Max spread as fraction of ATR
+input double           InpMaxSpreadAtr    = 0.15;                    // [Custom] Max spread as fraction of ATR
 
 input group "Misc"
 input ulong            InpMagic           = 26112402;                // Magic number
 input int              InpSlippagePts     = 30;                      // Max slippage (points)
-input int              InpTimerSec        = 15;                      // Timer interval (seconds)
+input int              InpTimerSec        = 0;                       // Timer interval seconds (0 = mode default)
 input string           InpLogFile         = "AITraderEA_log.csv";    // Log file in MQL5\Files
 
 //=== Types ===========================================================
@@ -132,7 +168,38 @@ struct AIProvider
    datetime          downUntil;  // skipped until this time after a failure
   };
 
+struct RuntimeConfig
+  {
+   ENUM_TRADE_MODE   mode;
+   ENUM_TIMEFRAMES   scanTF;
+   ENUM_TIMEFRAMES   manageTF;
+   int               bars;
+   int               maxHoldMin;
+   int               maxTradesDay;
+   int               maxPositions;
+   int               maxCandidates;
+   int               timerSec;
+   int               maxCalls;
+   double            slMin;
+   double            slMax;
+   double            minRR;
+   double            maxSpreadAtr;
+   double            riskPct;
+   double            minConf;
+   double            minManageConf;
+   double            minScanScore;
+   bool              consensus;
+   bool              consensusStrict;
+   bool              fridayClose;
+   int               sessStart;
+   int               sessEnd;
+   string            styleText;
+   string            profileText;
+   string            sessionText;
+  };
+
 //=== Globals =========================================================
+RuntimeConfig g_cfg;
 
 CTrade   g_trade;
 AIProvider g_prov[];
@@ -155,11 +222,8 @@ int OnInit()
       Print("AITrader: no usable AI provider (enable one and give it a key or key file)");
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(InpMaxRiskPct <= 0 || InpMaxRiskPct > 5 || InpMaxTotalRiskPct < InpMaxRiskPct)
-     {
-      Print("AITrader: risk inputs invalid (0 < max risk <= 5, total risk >= per-trade risk)");
+   if(!BuildConfig())
       return INIT_PARAMETERS_INCORRECT;
-     }
    if(!LoadSymbols())
       return INIT_FAILED;
 
@@ -169,11 +233,12 @@ int OnInit()
    if(MQLInfoInteger(MQL_TESTER))
       Print("AITrader: WebRequest is unavailable in the Strategy Tester; the EA will idle there.");
 
-   g_lastScanBar   = iTime(_Symbol, InpTimeframe, 0); // first scan on the next bar
-   g_lastManageBar = iTime(_Symbol, InpManageTF, 0);
-   EventSetTimer(MathMax(5, InpTimerSec));
-   PrintFormat("AITrader started: %d symbols, %s, providers %s, dry run %s",
-               ArraySize(g_syms), EnumToString(InpTimeframe), ProviderChain(), InpDryRun ? "ON" : "OFF");
+   g_lastScanBar   = iTime(_Symbol, g_cfg.scanTF, 0); // first scan on the next bar
+   g_lastManageBar = iTime(_Symbol, g_cfg.manageTF, 0);
+   EventSetTimer(g_cfg.timerSec);
+   PrintFormat("AITrader started: %s | %s session | %s | %d symbols | scan %s manage %s | risk %.2f%% | providers %s | dry run %s",
+               ModeName(), SessionName(), ProfileName(), ArraySize(g_syms), TfName(g_cfg.scanTF), TfName(g_cfg.manageTF),
+               g_cfg.riskPct, ProviderChain(), InpDryRun ? "ON" : "OFF");
    UpdateDashboard();
    return INIT_SUCCEEDED;
   }
@@ -203,7 +268,7 @@ void OnTimer()
    EnforceHardRules();
 
    // 2. AI position management on each new manage bar
-   datetime mBar = iTime(_Symbol, InpManageTF, 0);
+   datetime mBar = iTime(_Symbol, g_cfg.manageTF, 0);
    if(mBar != 0 && mBar != g_lastManageBar)
      {
       g_lastManageBar = mBar;
@@ -211,13 +276,172 @@ void OnTimer()
      }
 
    // 3. AI scan + entries on each new scan bar
-   datetime sBar = iTime(_Symbol, InpTimeframe, 0);
+   datetime sBar = iTime(_Symbol, g_cfg.scanTF, 0);
    if(sBar != 0 && sBar != g_lastScanBar)
      {
       g_lastScanBar = sBar;
       ScanAndEnter();
      }
    UpdateDashboard();
+  }
+
+//+------------------------------------------------------------------+
+//| STRATEGY PROFILE: mode x session x risk profile -> g_cfg          |
+//+------------------------------------------------------------------+
+bool BuildConfig()
+  {
+   if(InpMaxRiskPct <= 0 || InpRiskCeilingPct <= 0 || InpRiskCeilingPct > 5 || InpMaxTotalRiskPct <= 0)
+     {
+      Print("AITrader: risk inputs invalid (risk > 0, 0 < ceiling <= 5, total risk > 0)");
+      return false;
+     }
+   g_cfg.mode = InpTradeMode;
+
+   //--- trading mode presets ---------------------------------------
+   //                 scanTF      manageTF    bars slMin slMax  RR  holdMin spread trades timer calls
+   switch(InpTradeMode)
+     {
+      case MODE_SUPERSCALP:
+         SetMode(PERIOD_M1,  PERIOD_M1,  60, 0.5, 1.5, 1.0,    30, 0.30, 30,  3, 1500,
+                 "SUPERSCALPING: trades last 1-30 minutes on M1. Only take immediate momentum or micro-pullback "
+                 "entries with tight stops; spread and fees matter a lot. Exit fast: never let a winner turn into a "
+                 "loser, close stalled trades within a few bars.");
+         break;
+      case MODE_SCALP:
+         SetMode(PERIOD_M5,  PERIOD_M1,  60, 0.6, 2.0, 1.2,   180, 0.20, 15,  5,  600,
+                 "SCALPING: trades last minutes to ~3 hours on M5. Trade with the short-term momentum and M5/M15 "
+                 "structure, quick partial profits, move SL to breakeven early, close if momentum fades.");
+         break;
+      case MODE_SWING:
+         SetMode(PERIOD_H4,  PERIOD_H1,  60, 1.0, 3.5, 2.0, 14400, 0.10,  3, 30,   80,
+                 "SWING: trades last days to two weeks on H4. Trade with the daily/H4 trend at key levels, wide "
+                 "structural stops, big targets; ignore intraday noise and manage only on H4 structure changes.");
+         break;
+      case MODE_CUSTOM:
+         SetMode(InpTimeframe, InpManageTF, InpBarsForAI, InpMinSlAtr, InpMaxSlAtr, InpMinRR, InpMaxHoldHours * 60,
+                 InpMaxSpreadAtr, InpMaxTradesDay, 15, 150,
+                 StringFormat("CUSTOM: decisions on %s, management on %s.", TfName(InpTimeframe), TfName(InpManageTF)));
+         break;
+      default: // MODE_INTRADAY
+         SetMode(PERIOD_M15, PERIOD_M5,  48, 0.7, 2.5, 1.5,   720, 0.15,  6, 10,  300,
+                 "INTRADAY: trades open and close within the same day on M15, using H1 trend and the day's key "
+                 "levels (previous day high/low, session highs/lows). Flat by the end of the session.");
+         break;
+     }
+   g_cfg.fridayClose = !(InpTradeMode == MODE_SWING && InpSwingHoldWeekend);
+   if(InpTimerSec > 0)      g_cfg.timerSec = (int)MathMax(2, InpTimerSec);
+   if(InpMaxAICallsDay > 0) g_cfg.maxCalls = InpMaxAICallsDay;
+
+   //--- risk profile (Balanced = inputs as set) -----------------------
+   double riskMult = 1.0, tradesMult = 1.0;
+   g_cfg.minConf         = InpMinConfidence;
+   g_cfg.minManageConf   = InpMinManageConf;
+   g_cfg.maxPositions    = InpMaxPositions;
+   g_cfg.maxCandidates   = InpMaxCandidates;
+   g_cfg.minScanScore    = InpMinScanScore;
+   g_cfg.consensus       = InpEntryConsensus;
+   g_cfg.consensusStrict = InpConsensusStrict;
+   switch(InpRiskProfile)
+     {
+      case PROFILE_PASSIVE:
+         riskMult = 0.5; tradesMult = 0.34;
+         g_cfg.minConf = MathMax(g_cfg.minConf, 0.80);       g_cfg.minRR += 0.5;
+         g_cfg.minManageConf = MathMax(g_cfg.minManageConf, 0.80);
+         g_cfg.maxPositions = 1;                             g_cfg.maxCandidates = 1;
+         g_cfg.minScanScore = MathMax(g_cfg.minScanScore, 0.75);
+         g_cfg.consensus = true;                             g_cfg.consensusStrict = true;
+         g_cfg.profileText = "PASSIVE: take only A+ setups with full confluence; HOLD is the default answer. Risk the "
+                             "minimum. Manage hands-off: let SL/TP work and intervene only on clear invalidation.";
+         break;
+      case PROFILE_CONSERVATIVE:
+         riskMult = 0.75; tradesMult = 0.6;
+         g_cfg.minConf = MathMax(g_cfg.minConf, 0.72);       g_cfg.minRR += 0.3;
+         g_cfg.minManageConf = MathMax(g_cfg.minManageConf, 0.70);
+         g_cfg.maxPositions = (int)MathMin(g_cfg.maxPositions, 2);
+         g_cfg.minScanScore = MathMax(g_cfg.minScanScore, 0.70);
+         g_cfg.consensus = true;
+         g_cfg.profileText = "CONSERVATIVE: capital preservation first. Only trend-aligned, high-probability setups; "
+                             "lower risk when uncertain; take partial profits and move SL to breakeven early.";
+         break;
+      case PROFILE_AGGRESSIVE:
+         riskMult = 1.5; tradesMult = 1.5;
+         g_cfg.minConf = MathMin(g_cfg.minConf, 0.60);       g_cfg.minRR = MathMax(1.0, g_cfg.minRR - 0.3);
+         g_cfg.maxPositions += 2;                            g_cfg.maxCandidates += 1;
+         g_cfg.minScanScore = MathMin(g_cfg.minScanScore, 0.55);
+         g_cfg.profileText = "AGGRESSIVE: take more opportunities including momentum breakouts and well-defined "
+                             "counter-trend fades; use the upper part of the risk range on strong setups; let "
+                             "winners run with trailing stops. Never average down.";
+         break;
+      default:
+         g_cfg.profileText = "BALANCED: take clear setups with good reward:risk; size risk to setup quality.";
+         break;
+     }
+   g_cfg.riskPct      = MathMin(InpMaxRiskPct * riskMult, InpRiskCeilingPct);
+   g_cfg.riskPct      = MathMin(g_cfg.riskPct, InpMaxTotalRiskPct);
+   g_cfg.maxTradesDay = (int)MathMax(1, MathRound(g_cfg.maxTradesDay * tradesMult));
+
+   //--- session bias ---------------------------------------------------
+   switch(InpSession)
+     {
+      case SESSION_ASIAN:        SetSession(0, 8,  "ASIAN (00-08 GMT): usually range-bound and thinner. Favour JPY, AUD, NZD and XAU; fade range extremes, distrust breakouts."); break;
+      case SESSION_LONDON:       SetSession(7, 16, "LONDON (07-16 GMT): highest FX volume. Favour EUR, GBP, CHF and XAU; breakouts of the Asian range at the London open are common."); break;
+      case SESSION_NY:           SetSession(12, 21,"NEW YORK (12-21 GMT): favour USD pairs, XAU and US indices. US data at 12:30-14:00 GMT causes spikes; momentum often fades after 17:00 GMT."); break;
+      case SESSION_LONDON_NY:    SetSession(7, 21, "LONDON + NEW YORK (07-21 GMT): the most liquid hours. The 12-16 GMT overlap gives the strongest moves; favour EUR, GBP, USD pairs and XAU."); break;
+      case SESSION_ASIAN_LONDON: SetSession(0, 16, "ASIAN + LONDON (00-16 GMT): the Asian range forms first, then London often breaks it. Favour JPY/AUD in Asia, EUR/GBP/XAU from 07 GMT."); break;
+      case SESSION_NY_ASIAN:     SetSession(12, 8, "NEW YORK + ASIAN (12-08 GMT, overnight): NY momentum then quieter Asian trade. Avoid the 21-23 GMT rollover when spreads widen."); break;
+      default:                   SetSession(InpStartHour, InpEndHour, "No session bias: trade any liquid hour in the allowed window."); break;
+     }
+   return true;
+  }
+
+void SetMode(ENUM_TIMEFRAMES scan, ENUM_TIMEFRAMES manage, int bars, double slMin, double slMax, double rr,
+             int holdMin, double spreadAtr, int trades, int timer, int calls, string text)
+  {
+   g_cfg.scanTF = scan;        g_cfg.manageTF = manage;   g_cfg.bars = bars;
+   g_cfg.slMin = slMin;        g_cfg.slMax = slMax;       g_cfg.minRR = rr;
+   g_cfg.maxHoldMin = holdMin; g_cfg.maxSpreadAtr = spreadAtr;
+   g_cfg.maxTradesDay = trades; g_cfg.timerSec = timer;   g_cfg.maxCalls = calls;
+   g_cfg.styleText = text;
+  }
+
+void SetSession(int startHour, int endHour, string text)
+  {
+   g_cfg.sessStart = startHour; g_cfg.sessEnd = endHour; g_cfg.sessionText = text;
+  }
+
+// Session windows use GMT; "no session bias" uses server time.
+bool InSession()
+  {
+   MqlDateTime t;
+   TimeToStruct(InpSession == SESSION_NONE ? TimeCurrent() : TimeGMT(), t);
+   int s = g_cfg.sessStart, e = g_cfg.sessEnd, h = t.hour;
+   if(s == e) return true;
+   return s < e ? (h >= s && h < e) : (h >= s || h < e); // window may wrap midnight
+  }
+
+string ModeName()
+  {
+   string n[] = {"Superscalping", "Scalping", "Intraday", "Swing", "Custom"};
+   return n[(int)InpTradeMode];
+  }
+string SessionName()
+  {
+   string n[] = {"Any", "Asian", "London", "New York", "London-NY", "Asian-London", "NY-Asian"};
+   return n[(int)InpSession];
+  }
+string ProfileName()
+  {
+   string n[] = {"Passive", "Conservative", "Balanced", "Aggressive"};
+   return n[(int)InpRiskProfile];
+  }
+
+// Prepended to every AI system prompt so all stages share the same style.
+string ProfileBrief()
+  {
+   MqlDateTime g; TimeToStruct(TimeGMT(), g);
+   return StringFormat("TRADING STYLE - %s RISK PROFILE - %s SESSION - %s Current time %02d:%02d GMT. "
+                       "Risk per trade is capped at %.2f%% of equity; minimum reward:risk %.1f.",
+                       g_cfg.styleText, g_cfg.profileText, g_cfg.sessionText, g.hour, g.min, g_cfg.riskPct, g_cfg.minRR);
   }
 
 //+------------------------------------------------------------------+
@@ -237,20 +461,23 @@ void EnforceHardRules()
    if(IsFridayClose() && CountPositions() > 0)
       CloseAll("Friday close");
 
-   if(InpMaxHoldHours > 0)
+   if(InpCloseAtSessionEnd && g_cfg.mode != MODE_SWING && !InSession() && CountPositions() > 0)
+      CloseAll(SessionName() + " session ended");
+
+   if(g_cfg.maxHoldMin > 0)
       for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
          ulong t = PositionGetTicket(i);
          if(!IsOurs(t)) continue;
          datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
-         if(TimeCurrent() - opened >= (long)InpMaxHoldHours * 3600)
+         if(TimeCurrent() - opened >= (long)g_cfg.maxHoldMin * 60)
             ClosePosition(t, "max hold time");
         }
   }
 
 bool IsFridayClose()
   {
-   if(InpFridayCloseHour <= 0) return false;
+   if(InpFridayCloseHour <= 0 || !g_cfg.fridayClose) return false;
    MqlDateTime t; TimeToStruct(TimeCurrent(), t);
    return t.day_of_week == 5 && t.hour >= InpFridayCloseHour;
   }
@@ -281,7 +508,7 @@ void ScanAndEnter()
       "existing open position. Avoid picking several highly correlated symbols in the same direction. "
       "Reply ONLY with JSON: {\"candidates\":[{\"symbol\":\"...\",\"bias\":\"BUY\"|\"SELL\",\"score\":0.0-1.0,"
       "\"note\":\"max 15 words\"}],\"market_view\":\"max 25 words\"}. An empty candidates list is a valid answer.",
-      InpMaxCandidates, TfName(InpTimeframe));
+      g_cfg.maxCandidates, TfName(g_cfg.scanTF));
    string user = StringFormat("Server time %s. Open positions:\n%s\nScanner table:\n%s",
                               TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), PositionsSummary(), table);
 
@@ -297,7 +524,7 @@ void ScanAndEnter()
    LogRow("SCAN", "", "", 0, 0, 0, 0, 0, StringFormat("%d candidates", ArraySize(cands)), view);
 
    int analysed = 0;
-   for(int c = 0; c < ArraySize(cands) && analysed < InpMaxCandidates; c++)
+   for(int c = 0; c < ArraySize(cands) && analysed < g_cfg.maxCandidates; c++)
      {
       string sym   = JsonGetString(cands[c], "symbol");
       string bias  = JsonGetString(cands[c], "bias");
@@ -308,7 +535,7 @@ void ScanAndEnter()
 
       int idx = SymbolIndex(sym);
       if(idx < 0)                  { Print("AITrader: scan picked unknown symbol ", sym); continue; }
-      if(score < InpMinScanScore)  continue;
+      if(score < g_cfg.minScanScore)  continue;
       if(HasPosition(sym))         continue;
       if(!EntryAllowed(why))       { Print("AITrader: stop entries - ", why); break; }
       analysed++;
@@ -320,12 +547,11 @@ bool EntryAllowed(string &why)
   {
    if(g_haltedToday)                                  { why = "daily loss limit"; return false; }
    if(IsFridayClose())                                { why = "Friday close window"; return false; }
-   MqlDateTime t; TimeToStruct(TimeCurrent(), t);
-   if(t.hour < InpStartHour || t.hour >= InpEndHour)  { why = "outside entry hours"; return false; }
-   if(CountPositions() >= InpMaxPositions)            { why = "max positions"; return false; }
-   if(CountTodayEntries() >= InpMaxTradesDay)         { why = "max trades today"; return false; }
+   if(!InSession())                                   { why = "outside " + SessionName() + " session"; return false; }
+   if(CountPositions() >= g_cfg.maxPositions)            { why = "max positions"; return false; }
+   if(CountTodayEntries() >= g_cfg.maxTradesDay)         { why = "max trades today"; return false; }
    if(OpenRiskPct() >= InpMaxTotalRiskPct - 0.01)     { why = "total open risk cap"; return false; }
-   if(g_calls >= InpMaxAICallsDay)                    { why = "AI call budget"; return false; }
+   if(g_calls >= g_cfg.maxCalls)                    { why = "AI call budget"; return false; }
    if(!InpDryRun && (!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)))
                                                       { why = "algo trading disabled in terminal/EA"; return false; }
    return true;
@@ -336,7 +562,7 @@ string ScanRow(int i)
    string sym = g_syms[i];
    if(!SymbolTradable(sym)) return "";
    MqlRates r[]; ArraySetAsSeries(r, true);
-   if(CopyRates(sym, InpTimeframe, 1, 50, r) < 50) return "";
+   if(CopyRates(sym, g_cfg.scanTF, 1, 50, r) < 50) return "";
    double atr = Buf(g_hATR[i]), rsi = Buf(g_hRSI[i]);
    double e20 = Buf(g_hE20[i]), e50 = Buf(g_hE50[i]), e200 = Buf(g_hE200[i]);
    if(atr <= 0) return "";
@@ -357,10 +583,10 @@ void EvaluateEntry(int idx, string bias, double score, string note)
    string sym = g_syms[idx];
    double atr = Buf(g_hATR[idx]);
    double spread = SymbolInfoDouble(sym, SYMBOL_ASK) - SymbolInfoDouble(sym, SYMBOL_BID);
-   if(atr <= 0 || spread / atr > InpMaxSpreadAtr)
+   if(atr <= 0 || spread / atr > g_cfg.maxSpreadAtr)
      { Print("AITrader: ", sym, " spread too wide vs ATR"); return; }
 
-   double remaining = MathMin(InpMaxRiskPct, InpMaxTotalRiskPct - OpenRiskPct());
+   double remaining = MathMin(g_cfg.riskPct, InpMaxTotalRiskPct - OpenRiskPct());
    string system = StringFormat(
       "You are a disciplined trader and risk manager. The scanner flagged %s with a %s bias (score %.2f: %s). "
       "Confirm or reject using the data. Decide whether to open ONE position now and how much to risk. "
@@ -370,7 +596,7 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "major levels, or exposure correlated with open positions. BUY fills at ask, SELL at bid. SL beyond a "
       "logical swing level, %.1f-%.1f ATR from entry. TP at least %.1f x SL distance at a realistic target. "
       "Prices with %d decimals. HOLD with risk_percent 0 when the edge is unclear.",
-      sym, bias, score, note, remaining, InpMinSlAtr, InpMaxSlAtr, InpMinRR, SymDigits(sym));
+      sym, bias, score, note, remaining, g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
    string user = SymbolContext(idx) + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
@@ -383,14 +609,14 @@ void EvaluateEntry(int idx, string bias, double score, string note)
    d.reason = used + ": " + d.reason;
 
    // Second opinion from a DIFFERENT provider before any trade
-   if(InpEntryConsensus && (d.action == "BUY" || d.action == "SELL") && d.confidence >= InpMinConfidence)
+   if(g_cfg.consensus && (d.action == "BUY" || d.action == "SELL") && d.confidence >= g_cfg.minConf)
      {
       string system2 = system + " You are the independent second reviewer: judge the data yourself; do not assume "
                        "the scanner is right. Reject marginal setups.";
       string content2, used2;
       if(!CallAI(InpRouteEntry, "", system2, user, content2, used2, used))
         {
-         if(InpConsensusStrict)
+         if(g_cfg.consensusStrict)
            { LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: no 2nd model available", d.reason); return; }
          Notify(sym + ": no 2nd model available, using single-model decision");
         }
@@ -431,15 +657,15 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    double minStop = StopLevel(sym);
    double riskPct = MathMin(d.risk_pct, riskBudget);
 
-   if(d.confidence < InpMinConfidence)                  err = StringFormat("confidence %.2f < %.2f", d.confidence, InpMinConfidence);
+   if(d.confidence < g_cfg.minConf)                  err = StringFormat("confidence %.2f < %.2f", d.confidence, g_cfg.minConf);
    else if(riskPct <= 0)                                err = "risk_percent <= 0 or no budget";
    else if(isBuy && !(sl < bid && tp > ask))            err = "BUY needs sl < bid < ask < tp";
    else if(!isBuy && !(sl > ask && tp < bid))           err = "SELL needs tp < bid < ask < sl";
    else if(atr <= 0)                                    err = "ATR unavailable";
-   else if(slDist < InpMinSlAtr * atr || slDist > InpMaxSlAtr * atr)
-                                                        err = StringFormat("SL %.2f ATR outside [%.2f, %.2f]", slDist / atr, InpMinSlAtr, InpMaxSlAtr);
+   else if(slDist < g_cfg.slMin * atr || slDist > g_cfg.slMax * atr)
+                                                        err = StringFormat("SL %.2f ATR outside [%.2f, %.2f]", slDist / atr, g_cfg.slMin, g_cfg.slMax);
    else if(slDist <= minStop || tpDist <= minStop)      err = "SL/TP inside broker stop level";
-   else if(tpDist / slDist < InpMinRR)                  err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, InpMinRR);
+   else if(tpDist / slDist < g_cfg.minRR)                  err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, g_cfg.minRR);
 
    double lots = 0;
    if(err == "")
@@ -484,7 +710,7 @@ void ManagePositions()
      }
    for(int k = 0; k < ArraySize(tickets); k++)
      {
-      if(g_calls >= InpMaxAICallsDay) { Print("AITrader: AI budget used, skipping management"); return; }
+      if(g_calls >= g_cfg.maxCalls) { Print("AITrader: AI budget used, skipping management"); return; }
       if(!PositionSelectByTicket(tickets[k])) continue;
       ManageOne(tickets[k]);
      }
@@ -535,7 +761,7 @@ void ManageOne(ulong ticket)
 
    if(m.action == "HOLD")
      { LogRow("MANAGE", sym, "HOLD", m.confidence, 0, sl, tp, vol, "HOLD", m.reason); return; }
-   if(m.confidence < InpMinManageConf)
+   if(m.confidence < g_cfg.minManageConf)
      { LogRow("MANAGE", sym, m.action, m.confidence, 0, m.new_sl, m.new_tp, vol, "IGNORED: low confidence", m.reason); return; }
    if(!PositionSelectByTicket(ticket)) return; // closed meanwhile (SL/TP)
 
@@ -642,7 +868,7 @@ string SymbolContext(int idx)
   {
    string sym = g_syms[idx];
    int dg = SymDigits(sym);
-   string s = StringFormat("Symbol %s | %s | server time %s\n", sym, TfName(InpTimeframe),
+   string s = StringFormat("Symbol %s | %s | server time %s\n", sym, TfName(g_cfg.scanTF),
                            TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES));
    s += StringFormat("Bid %s Ask %s | ATR14 %s RSI14 %.1f EMA20 %s EMA50 %s EMA200 %s\n",
                      DoubleToString(SymbolInfoDouble(sym, SYMBOL_BID), dg), DoubleToString(SymbolInfoDouble(sym, SYMBOL_ASK), dg),
@@ -661,8 +887,8 @@ string SymbolContext(int idx)
      }
 
    MqlRates r[]; ArraySetAsSeries(r, true);
-   int n = CopyRates(sym, InpTimeframe, 1, InpBarsForAI, r);
-   s += StringFormat("Last %d closed %s bars, oldest first (time,o,h,l,c,vol):\n", MathMax(n, 0), TfName(InpTimeframe));
+   int n = CopyRates(sym, g_cfg.scanTF, 1, g_cfg.bars, r);
+   s += StringFormat("Last %d closed %s bars, oldest first (time,o,h,l,c,vol):\n", MathMax(n, 0), TfName(g_cfg.scanTF));
    for(int i = n - 1; i >= 0; i--)
       s += StringFormat("%s,%s,%s,%s,%s,%I64d\n", TimeToString(r[i].time, TIME_DATE | TIME_MINUTES),
                         DoubleToString(r[i].open, dg), DoubleToString(r[i].high, dg),
@@ -671,7 +897,7 @@ string SymbolContext(int idx)
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
    s += StringFormat("Account equity %.2f %s, today P/L %.2f%%, open risk %.2f%%, trades today %d/%d\n",
                      eq, AccountInfoString(ACCOUNT_CURRENCY), dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0,
-                     OpenRiskPct(), CountTodayEntries(), InpMaxTradesDay);
+                     OpenRiskPct(), CountTodayEntries(), g_cfg.maxTradesDay);
    return s;
   }
 
@@ -722,7 +948,7 @@ double OpenRiskPct()
       ulong t = PositionGetTicket(i);
       if(!IsOurs(t)) continue;
       double sl = PositionGetDouble(POSITION_SL);
-      if(sl == 0) { pct += InpMaxRiskPct; continue; }
+      if(sl == 0) { pct += g_cfg.riskPct; continue; }
       bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
       double pnl = 0;
       if(OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, PositionGetString(POSITION_SYMBOL),
@@ -775,6 +1001,7 @@ bool CallAI(ENUM_AI_ROUTE route, string stageModel, string system, string user, 
             string &used, string exclude)
   {
    content = ""; used = "";
+   system = ProfileBrief() + " " + system;
    int n = ArraySize(g_prov);
    int order[];
    ArrayResize(order, 0);
@@ -792,7 +1019,7 @@ bool CallAI(ENUM_AI_ROUTE route, string stageModel, string system, string user, 
       int i = order[k];
       if(g_prov[i].name == exclude) continue;
       if(anyUp && g_prov[i].downUntil > TimeCurrent()) continue;
-      if(g_calls >= InpMaxAICallsDay) { Print("AITrader: daily AI call budget reached"); return false; }
+      if(g_calls >= g_cfg.maxCalls) { Print("AITrader: daily AI call budget reached"); return false; }
       string model = (g_prov[i].name == InpP1Name && stageModel != "") ? stageModel : g_prov[i].model;
       string err = "";
       if(CallProvider(g_prov[i], model, system, user, content, err))
@@ -1075,11 +1302,11 @@ bool LoadSymbols()
       ArrayResize(g_syms, k + 1);   ArrayResize(g_hATR, k + 1); ArrayResize(g_hRSI, k + 1);
       ArrayResize(g_hE20, k + 1);   ArrayResize(g_hE50, k + 1); ArrayResize(g_hE200, k + 1);
       g_syms[k]  = s;
-      g_hATR[k]  = iATR(s, InpTimeframe, 14);
-      g_hRSI[k]  = iRSI(s, InpTimeframe, 14, PRICE_CLOSE);
-      g_hE20[k]  = iMA(s, InpTimeframe, 20, 0, MODE_EMA, PRICE_CLOSE);
-      g_hE50[k]  = iMA(s, InpTimeframe, 50, 0, MODE_EMA, PRICE_CLOSE);
-      g_hE200[k] = iMA(s, InpTimeframe, 200, 0, MODE_EMA, PRICE_CLOSE);
+      g_hATR[k]  = iATR(s, g_cfg.scanTF, 14);
+      g_hRSI[k]  = iRSI(s, g_cfg.scanTF, 14, PRICE_CLOSE);
+      g_hE20[k]  = iMA(s, g_cfg.scanTF, 20, 0, MODE_EMA, PRICE_CLOSE);
+      g_hE50[k]  = iMA(s, g_cfg.scanTF, 50, 0, MODE_EMA, PRICE_CLOSE);
+      g_hE200[k] = iMA(s, g_cfg.scanTF, 200, 0, MODE_EMA, PRICE_CLOSE);
       if(g_hATR[k] == INVALID_HANDLE || g_hRSI[k] == INVALID_HANDLE || g_hE20[k] == INVALID_HANDLE ||
          g_hE50[k] == INVALID_HANDLE || g_hE200[k] == INVALID_HANDLE)
         {
@@ -1231,11 +1458,14 @@ void UpdateDashboard()
   {
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
    string s = "AITraderEA  |  AI: " + ProviderChain() + "  |  last: " + g_lastProvider + (InpDryRun ? "  |  DRY RUN" : "  |  LIVE") + "\n";
-   s += StringFormat("Watchlist: %d symbols  |  Scan TF %s, manage TF %s\n", ArraySize(g_syms), TfName(InpTimeframe), TfName(InpManageTF));
+   s += StringFormat("Mode: %s  |  Session: %s (%s)  |  Profile: %s\n", ModeName(), SessionName(),
+                     InSession() ? "open" : "closed", ProfileName());
+   s += StringFormat("Watchlist: %d symbols  |  Scan TF %s, manage TF %s  |  Risk/trade %.2f%%, min conf %.2f, min R:R %.1f\n",
+                     ArraySize(g_syms), TfName(g_cfg.scanTF), TfName(g_cfg.manageTF), g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR);
    s += StringFormat("Day P/L: %.2f%%  |  Open risk: %.2f%% / %.2f%%  |  Positions: %d / %d  |  Trades today: %d / %d\n",
                      dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0, OpenRiskPct(), InpMaxTotalRiskPct,
-                     CountPositions(), InpMaxPositions, CountTodayEntries(), InpMaxTradesDay);
-   s += StringFormat("AI calls today: %d / %d%s\n", g_calls, InpMaxAICallsDay, g_haltedToday ? "  |  HALTED (daily loss)" : "");
+                     CountPositions(), g_cfg.maxPositions, CountTodayEntries(), g_cfg.maxTradesDay);
+   s += StringFormat("AI calls today: %d / %d%s\n", g_calls, g_cfg.maxCalls, g_haltedToday ? "  |  HALTED (daily loss)" : "");
    s += "Last scan: " + g_lastScan + "\n";
    s += "Last event: " + g_lastEvent;
    Comment(s);
