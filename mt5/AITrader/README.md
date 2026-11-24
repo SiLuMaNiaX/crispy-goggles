@@ -19,8 +19,8 @@ Each AI call tries the providers in this order:
 | Stage | Runs on (default) | Why |
 |---|---|---|
 | SCAN (each new bar of the mode's scan timeframe) | **DeepSeek** | Runs often and ranks a table; a cheap, fast model is enough |
-| ENTRY | **asAi** (primary) | The decision that commits money; give it your strongest model |
-| ENTRY second opinion | **the next provider that is not the one that answered** (usually DeepSeek or OpenRouter) | An independent check, so one model cannot open a trade on its own |
+| ENTRY | **asAi** (`asai/gpt-6.2-astra`) | The decision that commits money; give it your strongest model |
+| ENTRY second opinion | **OpenRouter** (`google/gemini-4-carbon`), or the next provider if OpenRouter answered the first call or is down | A different model family checks the trade, so one model cannot open a trade on its own |
 | MANAGE (each new bar of the mode's manage timeframe, per position) | **DeepSeek** | High volume; HOLD is the usual answer |
 
 Each stage still fails over to the other providers when its first choice is down. You can change the routing in *Multi-model routing*.
@@ -144,7 +144,7 @@ The portfolio limits are max positions, max trades per day, max total open risk 
    - ✅ **Allow algorithmic trading**. This box is unchecked in your screenshot.
    - ✅ **Allow WebRequest for listed URL**: **add `https://serveras.click`**. This is the asAi API host, which is different from the `serverasai.com` dashboard site. Keep `https://api.deepseek.com` and `https://openrouter.ai`, which you already have.
 3. Create the three key files in `<Common>\Files` (usually `%APPDATA%\MetaQuotes\Terminal\Common\Files`). Put each key alone on one line, using the file names in the table above. You can paste keys into the inputs instead, but they are then saved in plain text with the chart settings.
-4. In asAi → **Models**, copy the exact model ID you want and paste it into *Provider 1 → Model id*. The default `deepseek-chat` is only a placeholder.
+4. Models are set in the inputs. The defaults are `asai/gpt-6.2-astra` (asAi), `deepseek-chat` (DeepSeek) and `google/gemini-4-carbon` (OpenRouter). You can change them on the EA's Inputs tab without recompiling.
 5. Set **Watchlist** to plain names such as `XAUUSD,EURUSD`. The EA adds your broker's suffix or prefix automatically (`XAUUSD` → `XAUUSDc`, `XAUUSD.m`, …). The Experts log shows each mapping as `XAUUSD -> broker symbol XAUUSDc`. You can also type the exact broker names.
 6. Attach the EA to **one** chart. Any symbol works; that chart's symbol only provides the bar timing. Tick *Allow Algo Trading* in the EA's Common tab.
 7. Run with **Dry run = true** on a demo account for at least 1–2 weeks. Then review `MQL5\Files\AITraderEA_log.csv`, which records every scan, entry, hold, rejection, management action and close.

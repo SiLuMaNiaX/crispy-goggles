@@ -66,7 +66,7 @@ input string           InpP1Name          = "asAi";                  // Name (fo
 input string           InpP1Url           = "https://serveras.click/v1/chat/completions"; // Chat completions URL
 input string           InpP1Key           = "";                      // API key (empty = read key file)
 input string           InpP1KeyFile       = "aitrader_key_asai.txt"; // Key file in <Common>\Files
-input string           InpP1Model         = "deepseek-chat";         // Model id (copy from asAi > Models)
+input string           InpP1Model         = "asai/gpt-6.2-astra";    // Model id (copy from asAi > Models)
 input string           InpModelScan       = "";                      // Primary model for SCAN (empty = Model id)
 input string           InpModelEntry      = "";                      // Primary model for ENTRY (empty = Model id)
 input string           InpModelManage     = "";                      // Primary model for MANAGE (empty = Model id)
@@ -81,12 +81,13 @@ input group "AI provider 3 - BACKUP (OpenRouter)"
 input bool             InpP3Enabled       = true;                    // Enabled
 input string           InpP3Key           = "";                      // API key (empty = read key file)
 input string           InpP3KeyFile       = "aitrader_key_openrouter.txt"; // Key file in <Common>\Files
-input string           InpP3Model         = "deepseek/deepseek-chat"; // Model slug
+input string           InpP3Model         = "google/gemini-4-carbon"; // Model slug
 
 input group "Multi-model routing"
 input ENUM_AI_ROUTE    InpRouteScan       = ROUTE_DEEPSEEK;          // SCAN runs on (others = failover)
 input ENUM_AI_ROUTE    InpRouteEntry      = ROUTE_PRIMARY;           // ENTRY runs on (others = failover)
 input ENUM_AI_ROUTE    InpRouteManage     = ROUTE_DEEPSEEK;          // MANAGE runs on (others = failover)
+input ENUM_AI_ROUTE    InpRouteReview     = ROUTE_OPENROUTER;        // ENTRY 2nd opinion runs on (must differ from 1st)
 input bool             InpEntryConsensus  = true;                    // [Balanced/Aggressive] ENTRY needs a 2nd model to agree
 input bool             InpConsensusStrict = false;                   // If no 2nd provider is available: true = skip trade
 
@@ -691,7 +692,7 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       string system2 = system + " You are the independent second reviewer: judge the data yourself; do not assume "
                        "the scanner is right. Reject marginal setups.";
       string content2, used2;
-      if(!CallAI(InpRouteEntry, "", system2, user, content2, used2, used))
+      if(!CallAI(InpRouteReview, "", system2, user, content2, used2, used))
         {
          if(g_cfg.consensusStrict)
            { LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: no 2nd model available", d.reason); return; }
