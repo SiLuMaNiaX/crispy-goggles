@@ -231,6 +231,11 @@ string   g_lastScan = "-", g_lastEvent = "-";
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   // Globals survive an input change / timeframe switch (OnDeinit+OnInit without unloading),
+   // so reset everything that OnInit appends to or caches.
+   ArrayResize(g_prov, 0);
+   ArrayResize(g_syms, 0);
+   g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, InpP2KeyFile, InpP2Model, false);
    AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, InpP3KeyFile, InpP3Model, true);
