@@ -153,7 +153,7 @@ input bool             InpShowPanel       = true;                    // Show das
 input int              InpPanelX          = 8;                       // Panel X offset (px from left)
 input int              InpPanelY          = 100;                     // Panel Y offset (px from top; clears one-click trading)
 input int              InpPanelFontSize   = 9;                       // Panel font size
-input int              InpPanelWrapChars  = 95;                      // Wrap long lines after N characters
+input int              InpPanelWrapChars  = 80;                      // Wrap long lines after N characters
 
 //=== Types ===========================================================
 struct EntryDecision
@@ -286,6 +286,10 @@ void OnTimer()
   {
    if(MQLInfoInteger(MQL_TESTER)) return;
    RollDay();
+
+   // Algo Trading off (toolbar button, EA checkbox, or this copy was moved to the MQL5 VPS):
+   // stay idle so a second copy does not spend API calls.
+   if(!AlgoTradingOn()) { UpdateDashboard(); return; }
 
    // 1. Hard rules first (no AI needed)
    EnforceHardRules();
@@ -1095,6 +1099,11 @@ string ProviderChain()
    return s;
   }
 
+bool AlgoTradingOn()
+  {
+   return TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED);
+  }
+
 string HostOf(string url)
   {
    int p = StringFind(url, "://");
@@ -1645,8 +1654,9 @@ void UpdateDashboard()
 
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
    double dayPct = dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0;
-   string status = g_haltedToday ? "HALTED - daily loss limit" : (InpDryRun ? "DRY RUN - no orders sent" : "LIVE TRADING");
-   color  stClr  = g_haltedToday ? CLR_BAD : (InpDryRun ? CLR_WARN : CLR_BAD);
+   string status = !AlgoTradingOn() ? "PAUSED - Algo Trading off here (or EA moved to VPS)" :
+                   g_haltedToday ? "HALTED - daily loss limit" : (InpDryRun ? "DRY RUN - no orders sent" : "LIVE TRADING");
+   color  stClr  = !AlgoTradingOn() ? CLR_HEAD : g_haltedToday ? CLR_BAD : (InpDryRun ? CLR_WARN : CLR_BAD);
 
    PanelAdd("AI TRADER EA", CLR_TITLE);
    PanelAdd(status, stClr);
@@ -1677,17 +1687,21 @@ void UpdateDashboard()
 void DrawPanel()
   {
    int n = ArraySize(g_pTxt);
-   int pad = 10;
-   TextSetFont("Consolas", -InpPanelFontSize * 10);
-   uint w = 0, h = 0;
-   int maxW = 0, lineH = 0;
-   for(int i = 0; i < n; i++)
-     {
-      TextGetSize(g_pTxt[i] == "" ? " " : g_pTxt[i], w, h);
-      if((int)w > maxW)  maxW = (int)w;
-      if((int)h > lineH) lineH = (int)h;
-     }
-   lineH += 3;
+   // Size from the screen DPI so Windows display scaling (125%, 150%, ...) does not clip text.
+   // Consolas is monospaced: character width ~0.55 em, line height ~1.35 em.
+   double dpi   = (double)MathMax(96, (int)TerminalInfoInteger(TERMINAL_SCREEN_DPI));
+   double emPx  = InpPanelFontSize * dpi / 72.0;
+   int    pad   = (int)MathRound(emPx * 0.6);
+   int    lineH = (int)MathCeil(emPx * 1.35);
+   int    maxChars = 1;
+   for(int i = 0; i < n; i++) maxChars = MathMax(maxChars, StringLen(g_pTxt[i]));
+   int    maxW  = (int)MathCeil(maxChars * emPx * 0.56);
+   int    panelH = n * lineH + 2 * pad;
+
+   // keep the whole panel inside the chart window
+   int chartH = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
+   int y = InpPanelY;
+   if(chartH > 0 && y + panelH > chartH) y = MathMax(0, chartH - panelH - 4);
 
    string bg = PANEL_PREFIX + "bg";
    if(ObjectFind(0, bg) < 0)
@@ -1700,9 +1714,9 @@ void DrawPanel()
       ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
      }
    ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, InpPanelX);
-   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, InpPanelY);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, bg, OBJPROP_XSIZE, maxW + 2 * pad);
-   ObjectSetInteger(0, bg, OBJPROP_YSIZE, n * lineH + 2 * pad - 3);
+   ObjectSetInteger(0, bg, OBJPROP_YSIZE, panelH);
    ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, CLR_PANEL_BG);
    ObjectSetInteger(0, bg, OBJPROP_COLOR, CLR_PANEL_BORDER);
 
@@ -1721,7 +1735,7 @@ void DrawPanel()
         }
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpPanelFontSize);
       ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + pad);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + pad + i * lineH);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + pad + i * lineH);
       ObjectSetInteger(0, name, OBJPROP_COLOR, g_pClr[i]);
       ObjectSetString(0, name, OBJPROP_TEXT, g_pTxt[i] == "" ? " " : g_pTxt[i]);
      }
