@@ -1502,9 +1502,17 @@ string ReadKeyFile(const string name)
   {
    int h = FileOpen(name, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(h == INVALID_HANDLE) return "";
-   string key = FileReadString(h);
+   string raw = FileReadString(h);
    FileClose(h);
-   StringTrimLeft(key); StringTrimRight(key);
+   // Keep printable ASCII only: drops a Notepad UTF-8 BOM, spaces, tabs and line breaks.
+   string key = "";
+   for(int i = 0; i < StringLen(raw); i++)
+     {
+      ushort c = StringGetCharacter(raw, i);
+      if(c > 32 && c < 127) key += ShortToString(c);
+     }
+   if(key != "")
+      PrintFormat("AITrader: key loaded from %s (%s...%s)", name, StringSubstr(key, 0, 4), StringSubstr(key, StringLen(key) - 4));
    return key;
   }
 
