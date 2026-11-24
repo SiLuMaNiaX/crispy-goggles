@@ -137,6 +137,21 @@ The chart dashboard shows the active mode, session (open or closed), profile and
 
 The portfolio limits are max positions, max trades per day, max total open risk (3% by default), entry hours and the daily AI call budget.
 
+## API keys: where to put them
+
+| Where | Works on | Shown in logs? |
+|---|---|---|
+| **`AITraderKeys.mqh`**, compiled into the EA (recommended) | PC **and** MQL5 VPS | **No** |
+| Key files in `<Common>\Files` | PC only (not copied to the VPS) | No |
+| EA inputs (*API key* fields) | PC and VPS | **Yes**: MT5 prints every input in the terminal and VPS log. Don't use these. |
+
+To use the compiled-in option:
+1. Copy `AITraderKeys.mqh` next to `AITraderEA.mq5` in `MQL5\Experts`.
+2. Paste each key between the quotes and save.
+3. Compile `AITraderEA.mq5` with F7, then sync to the VPS.
+
+Keep the *API key* inputs empty. Never share the compiled `.ex5` or a filled-in `AITraderKeys.mqh`.
+
 ## Setup
 
 1. Copy `AITraderEA.mq5` into `<Data Folder>\MQL5\Experts\`, open it in MetaEditor and compile it with **F7**.

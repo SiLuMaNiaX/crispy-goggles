@@ -16,6 +16,7 @@
 #property version   "2.00"
 
 #include <Trade/Trade.mqh>
+#include "AITraderKeys.mqh"   // optional compiled-in API keys (never printed in logs)
 
 // Dashboard panel
 #define PANEL_PREFIX "AITraderPanel_"
@@ -75,7 +76,7 @@ input group "AI provider 1 - PRIMARY (asAi, OpenAI-compatible)"
 input bool             InpP1Enabled       = true;                    // Enabled
 input string           InpP1Name          = "asAi";                  // Name (for logs)
 input string           InpP1Url           = "https://serveras.click/v1/chat/completions"; // Chat completions URL
-input string           InpP1Key           = "";                      // API key (empty = read key file)
+input string           InpP1Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP1KeyFile       = "aitrader_key_asai.txt"; // Key file in <Common>\Files
 input string           InpP1Model         = "asai/gpt-6.2-astra";    // Model id (copy from asAi > Models)
 input string           InpModelScan       = "";                      // Primary model for SCAN (empty = Model id)
@@ -84,13 +85,13 @@ input string           InpModelManage     = "";                      // Primary 
 
 input group "AI provider 2 - BACKUP (DeepSeek)"
 input bool             InpP2Enabled       = true;                    // Enabled
-input string           InpP2Key           = "";                      // API key (empty = read key file)
+input string           InpP2Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP2KeyFile       = "aitrader_key_deepseek.txt"; // Key file in <Common>\Files
 input string           InpP2Model         = "deepseek-chat";         // Model
 
 input group "AI provider 3 - BACKUP (OpenRouter)"
 input bool             InpP3Enabled       = true;                    // Enabled
-input string           InpP3Key           = "";                      // API key (empty = read key file)
+input string           InpP3Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP3KeyFile       = "aitrader_key_openrouter.txt"; // Key file in <Common>\Files
 input string           InpP3Model         = "google/gemini-4-carbon"; // Model slug
 
@@ -236,9 +237,9 @@ int OnInit()
    ArrayResize(g_prov, 0);
    ArrayResize(g_syms, 0);
    g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
-   AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, InpP1KeyFile, InpP1Model, false);
-   AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, InpP2KeyFile, InpP2Model, false);
-   AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, InpP3KeyFile, InpP3Model, true);
+   AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
+   AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
+   AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
    if(ArraySize(g_prov) == 0)
      {
       Print("AITrader: no usable AI provider (enable one and give it a key or key file)");
@@ -645,12 +646,16 @@ void ScanAndEnter()
 
       int idx = SymbolIndex(sym);
       if(idx < 0)                  { Print("AITrader: scan picked unknown symbol ", sym); continue; }
-      if(score < g_cfg.minScanScore)  continue;
+      if(score < g_cfg.minScanScore)
+        { PrintFormat("AITrader: scan pick %s %s score %.2f < %.2f - skipped (%s)", sym, bias, score, g_cfg.minScanScore, note); continue; }
       if(HasPosition(sym))         continue;
       if(!EntryAllowed(why))       { Print("AITrader: stop entries - ", why); break; }
       analysed++;
+      PrintFormat("AITrader: scan pick %s %s score %.2f -> asking for entry (%s)", sym, bias, score, note);
       EvaluateEntry(idx, bias, score, note);
      }
+   if(ArraySize(cands) == 0)
+      Print("AITrader: scan - no setups. ", view);
   }
 
 bool EntryAllowed(string &why)
@@ -1080,11 +1085,18 @@ double OpenRiskPct()
 //+------------------------------------------------------------------+
 //| AI HTTP client (OpenAI-compatible chat completions)               |
 //+------------------------------------------------------------------+
-void AddProvider(bool enabled, string name, string url, string key, string keyFile, string model, bool openrouter)
+// Key sources, first non-empty wins:
+//   1. the EA input      - WARNING: MT5 prints every input in the log, keys included
+//   2. AITraderKeys.mqh  - compiled into the .ex5, so it reaches the VPS and is never logged
+//   3. <Common>\Files    - PC only, not migrated to the MQL5 VPS
+void AddProvider(bool enabled, string name, string url, string key, string compiledKey, string keyFile,
+                 string model, bool openrouter)
   {
    if(!enabled) return;
+   if(key != "") PrintFormat("AITrader: %s key comes from the EA input - it is visible in the terminal log; prefer AITraderKeys.mqh", name);
+   if(key == "" && compiledKey != "") { key = compiledKey; PrintFormat("AITrader: %s key loaded from AITraderKeys.mqh", name); }
    if(key == "") key = ReadKeyFile(keyFile);
-   if(key == "") { PrintFormat("AITrader: %s skipped - no key (input empty and <Common>\\Files\\%s missing)", name, keyFile); return; }
+   if(key == "") { PrintFormat("AITrader: %s skipped - no key (input, AITraderKeys.mqh and <Common>\\Files\\%s all empty)", name, keyFile); return; }
    int n = ArraySize(g_prov);
    ArrayResize(g_prov, n + 1);
    g_prov[n].name = name; g_prov[n].url = url; g_prov[n].key = key;
