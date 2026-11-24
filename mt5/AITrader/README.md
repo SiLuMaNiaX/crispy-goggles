@@ -74,19 +74,26 @@ Three selectors at the top of the inputs control how the EA trades. Each one cha
 - Inputs marked **[Custom]** apply only when the mode is Custom.
 - **Superscalping caveat:** an AI reply takes about 2–20 s, and with entry consensus each trade needs two replies. On M1 that delay is a large part of the trade's life. The EA re-reads the live price and re-checks the stop-loss and take-profit before sending, so stale signals are rejected rather than filled badly. Even so, superscalping depends on very low spreads and fast AI responses, and it uses the most API calls. Test it in dry run first.
 
-### 2. Session bias (times in GMT)
+### 2. Session bias (adjusts for daylight saving automatically)
 
-| Session | Window | What the AI is told |
-|---|---|---|
-| No session bias | *Entries from/until* inputs (server time) | Trade any liquid hour |
-| Asian | 00–08 | Range-bound; favour JPY/AUD/NZD and XAU; fade extremes |
-| London | 07–16 | Highest volume; EUR/GBP/CHF/XAU; London-open breakouts of the Asian range |
-| New York | 12–21 | USD pairs, XAU, indices; US data spikes 12:30–14:00 |
-| London-NY | 07–21 | Most liquid hours; strongest moves in the 12–16 overlap |
-| Asian-London | 00–16 | The Asian range forms, then London often breaks it |
-| NY-Asian | 12–08 (overnight) | NY momentum, then quieter Asia; avoid the 21–23 rollover |
+Each session is defined in its own city's **local time**. The EA converts it to GMT every day using that country's daylight-saving rules, so you never need to shift anything by hand.
 
-New entries are only allowed inside the window, and the window also sets when the session-end close happens. The windows are fixed in GMT, so they don't follow daylight-saving changes; shift them by an hour if you need to.
+| Session | Local definition | GMT, winter | GMT, summer | What the AI is told |
+|---|---|---|---|---|
+| No session bias | *Entries from/until* inputs | server time | server time | Trade any liquid hour |
+| Asian | Tokyo 09:00–17:00 (Japan has no DST) | 00:00–08:00 | 00:00–08:00 | Range-bound; favour JPY/AUD/NZD and XAU; fade extremes |
+| London | London 08:00–17:00 | 08:00–17:00 | 07:00–16:00 | Highest volume; EUR/GBP/CHF/XAU; London-open breakouts of the Asian range |
+| New York | New York 08:00–17:00 | 13:00–22:00 | 12:00–21:00 | USD pairs, XAU, indices; US data spikes at 08:30–10:00 New York time |
+| London-NY | London open → New York close | 08:00–22:00 | 07:00–21:00 | Most liquid hours; strongest moves in the overlap |
+| Asian-London | Tokyo open → London close | 00:00–17:00 | 00:00–16:00 | The Asian range forms, then London often breaks it |
+| NY-Asian | New York open → Tokyo close (overnight) | 13:00–08:00 | 12:00–08:00 | NY momentum, then quieter Asia; avoid the 17:00 New York rollover |
+
+- **UK clocks** change on the last Sunday of March and the last Sunday of October.
+- **US clocks** change on the second Sunday of March and the first Sunday of November.
+- For 2–3 weeks each spring and autumn the two countries are out of step. During those weeks each session still follows its own city. For example, on 15 March 2026 London is 08:00–17:00 GMT while New York is already 12:00–21:00 GMT.
+- The AI is told the actual window for the day and the current time in London (GMT/BST), New York (EST/EDT) and Tokyo. The chart dashboard shows the same clocks.
+- New entries are only allowed inside the window, and positions are closed when it ends (except in Swing mode).
+- These times rely on your PC's clock and time zone being set correctly, because MT5 works out GMT from the PC clock.
 
 ### 3. Risk profile
 
@@ -94,7 +101,6 @@ The Balanced profile uses your inputs as set. The other profiles adjust them:
 
 | Profile | Risk/trade | Min confidence | Min R:R | Max positions | Trades/day | Candidates | Entry consensus | AI behaviour |
 |---|---|---|---|---|---|---|---|---|
-| **Passive** | × 0.5 | ≥ 0.80 | +0.5 | 1 | × 0.34 | 1 (score ≥ 0.75) | required; trade skipped if no 2nd model | Only A+ setups; hands-off management, intervenes only on invalidation |
 | **Conservative** (default) | × 0.75 | ≥ 0.72 | +0.3 | ≤ 2 | × 0.6 | score ≥ 0.70 | required | Capital first; trend-aligned only; early partial profits and breakeven |
 | **Balanced** | × 1.0 | input (0.65) | mode value | input (3) | mode value | input | input | Clear setups, risk sized to setup quality |
 | **Aggressive** | × 1.5 | ≤ 0.60 | −0.3 (min 1.0) | +2 | × 1.5 | +1, score ≥ 0.55 | input | More setups including breakouts and fades; lets winners run; never averages down |
@@ -105,19 +111,15 @@ The Balanced profile uses your inputs as set. The other profiles adjust them:
 
 | Mode | Profile | Risk/trade | Min conf | Min R:R | Max positions | Trades/day |
 |---|---|---|---|---|---|---|
-| Superscalping | Passive | 0.50% | 0.80 | 1.5 | 1 | 10 |
 | Superscalping | Conservative | 0.75% | 0.72 | 1.3 | 2 | 18 |
 | Superscalping | Balanced | 1.00% | 0.65 | 1.0 | 3 | 30 |
 | Superscalping | Aggressive | 1.50% | 0.60 | 1.0 | 5 | 45 |
-| Scalping | Passive | 0.50% | 0.80 | 1.7 | 1 | 5 |
 | Scalping | Conservative | 0.75% | 0.72 | 1.5 | 2 | 9 |
 | Scalping | Balanced | 1.00% | 0.65 | 1.2 | 3 | 15 |
 | Scalping | Aggressive | 1.50% | 0.60 | 1.0 | 5 | 22 |
-| Intraday | Passive | 0.50% | 0.80 | 2.0 | 1 | 2 |
 | Intraday | Conservative | 0.75% | 0.72 | 1.8 | 2 | 4 |
 | Intraday | Balanced | 1.00% | 0.65 | 1.5 | 3 | 6 |
 | Intraday | Aggressive | 1.50% | 0.60 | 1.2 | 5 | 9 |
-| Swing | Passive | 0.50% | 0.80 | 2.5 | 1 | 1 |
 | Swing | Conservative | 0.75% | 0.72 | 2.3 | 2 | 2 |
 | Swing | Balanced | 1.00% | 0.65 | 2.0 | 3 | 3 |
 | Swing | Aggressive | 1.50% | 0.60 | 1.7 | 5 | 4 |

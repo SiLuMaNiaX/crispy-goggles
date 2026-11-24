@@ -36,20 +36,19 @@ enum ENUM_TRADE_MODE
 enum ENUM_SESSION_BIAS
   {
    SESSION_NONE         = 0, // No session bias (server-hour window)
-   SESSION_ASIAN        = 1, // Asian      00-08 GMT
-   SESSION_LONDON       = 2, // London     07-16 GMT
-   SESSION_NY           = 3, // New York   12-21 GMT
-   SESSION_LONDON_NY    = 4, // London + NY 07-21 GMT (overlap 12-16)
-   SESSION_ASIAN_LONDON = 5, // Asian + London 00-16 GMT
-   SESSION_NY_ASIAN     = 6  // NY + Asian 12-08 GMT (overnight)
+   SESSION_ASIAN        = 1, // Asian (Tokyo 09-17)
+   SESSION_LONDON       = 2, // London (London 08-17, DST-aware)
+   SESSION_NY           = 3, // New York (New York 08-17, DST-aware)
+   SESSION_LONDON_NY    = 4, // London open -> NY close
+   SESSION_ASIAN_LONDON = 5, // Tokyo open -> London close
+   SESSION_NY_ASIAN     = 6  // NY open -> Tokyo close (overnight)
   };
 
 enum ENUM_RISK_PROFILE
   {
-   PROFILE_PASSIVE      = 0, // Passive (A+ setups only, hands-off)
-   PROFILE_CONSERVATIVE = 1, // Conservative (capital first)
-   PROFILE_BALANCED     = 2, // Balanced (inputs as set)
-   PROFILE_AGGRESSIVE   = 3  // Aggressive (more trades, more risk)
+   PROFILE_CONSERVATIVE = 0, // Conservative (capital first)
+   PROFILE_BALANCED     = 1, // Balanced (inputs as set)
+   PROFILE_AGGRESSIVE   = 2  // Aggressive (more trades, more risk)
   };
 
 //=== Inputs ==========================================================
@@ -191,8 +190,6 @@ struct RuntimeConfig
    bool              consensus;
    bool              consensusStrict;
    bool              fridayClose;
-   int               sessStart;
-   int               sessEnd;
    string            styleText;
    string            profileText;
    string            sessionText;
@@ -343,16 +340,6 @@ bool BuildConfig()
    g_cfg.consensusStrict = InpConsensusStrict;
    switch(InpRiskProfile)
      {
-      case PROFILE_PASSIVE:
-         riskMult = 0.5; tradesMult = 0.34;
-         g_cfg.minConf = MathMax(g_cfg.minConf, 0.80);       g_cfg.minRR += 0.5;
-         g_cfg.minManageConf = MathMax(g_cfg.minManageConf, 0.80);
-         g_cfg.maxPositions = 1;                             g_cfg.maxCandidates = 1;
-         g_cfg.minScanScore = MathMax(g_cfg.minScanScore, 0.75);
-         g_cfg.consensus = true;                             g_cfg.consensusStrict = true;
-         g_cfg.profileText = "PASSIVE: take only A+ setups with full confluence; HOLD is the default answer. Risk the "
-                             "minimum. Manage hands-off: let SL/TP work and intervene only on clear invalidation.";
-         break;
       case PROFILE_CONSERVATIVE:
          riskMult = 0.75; tradesMult = 0.6;
          g_cfg.minConf = MathMax(g_cfg.minConf, 0.72);       g_cfg.minRR += 0.3;
@@ -380,16 +367,16 @@ bool BuildConfig()
    g_cfg.riskPct      = MathMin(g_cfg.riskPct, InpMaxTotalRiskPct);
    g_cfg.maxTradesDay = (int)MathMax(1, MathRound(g_cfg.maxTradesDay * tradesMult));
 
-   //--- session bias ---------------------------------------------------
+   //--- session bias (windows are computed live in SessionWindow, DST-aware) ---
    switch(InpSession)
      {
-      case SESSION_ASIAN:        SetSession(0, 8,  "ASIAN (00-08 GMT): usually range-bound and thinner. Favour JPY, AUD, NZD and XAU; fade range extremes, distrust breakouts."); break;
-      case SESSION_LONDON:       SetSession(7, 16, "LONDON (07-16 GMT): highest FX volume. Favour EUR, GBP, CHF and XAU; breakouts of the Asian range at the London open are common."); break;
-      case SESSION_NY:           SetSession(12, 21,"NEW YORK (12-21 GMT): favour USD pairs, XAU and US indices. US data at 12:30-14:00 GMT causes spikes; momentum often fades after 17:00 GMT."); break;
-      case SESSION_LONDON_NY:    SetSession(7, 21, "LONDON + NEW YORK (07-21 GMT): the most liquid hours. The 12-16 GMT overlap gives the strongest moves; favour EUR, GBP, USD pairs and XAU."); break;
-      case SESSION_ASIAN_LONDON: SetSession(0, 16, "ASIAN + LONDON (00-16 GMT): the Asian range forms first, then London often breaks it. Favour JPY/AUD in Asia, EUR/GBP/XAU from 07 GMT."); break;
-      case SESSION_NY_ASIAN:     SetSession(12, 8, "NEW YORK + ASIAN (12-08 GMT, overnight): NY momentum then quieter Asian trade. Avoid the 21-23 GMT rollover when spreads widen."); break;
-      default:                   SetSession(InpStartHour, InpEndHour, "No session bias: trade any liquid hour in the allowed window."); break;
+      case SESSION_ASIAN:        g_cfg.sessionText = "ASIAN (Tokyo 09:00-17:00): usually range-bound and thinner. Favour JPY, AUD, NZD and XAU; fade range extremes, distrust breakouts."; break;
+      case SESSION_LONDON:       g_cfg.sessionText = "LONDON (08:00-17:00 London time): highest FX volume. Favour EUR, GBP, CHF and XAU; breakouts of the Asian range at the London open are common."; break;
+      case SESSION_NY:           g_cfg.sessionText = "NEW YORK (08:00-17:00 New York time): favour USD pairs, XAU and US indices. US data at 08:30-10:00 New York time causes spikes; momentum often fades after midday New York."; break;
+      case SESSION_LONDON_NY:    g_cfg.sessionText = "LONDON + NEW YORK (London open to New York close): the most liquid hours. The London-NY overlap gives the strongest moves; favour EUR, GBP, USD pairs and XAU."; break;
+      case SESSION_ASIAN_LONDON: g_cfg.sessionText = "ASIAN + LONDON (Tokyo open to London close): the Asian range forms first, then London often breaks it. Favour JPY/AUD in Asia, EUR/GBP/XAU from the London open."; break;
+      case SESSION_NY_ASIAN:     g_cfg.sessionText = "NEW YORK + ASIAN (New York open to Tokyo close, overnight): NY momentum then quieter Asian trade. Avoid the daily rollover (17:00 New York) when spreads widen."; break;
+      default:                   g_cfg.sessionText = "No session bias: trade any liquid hour in the allowed window."; break;
      }
    return true;
   }
@@ -404,19 +391,109 @@ void SetMode(ENUM_TIMEFRAMES scan, ENUM_TIMEFRAMES manage, int bars, double slMi
    g_cfg.styleText = text;
   }
 
-void SetSession(int startHour, int endHour, string text)
-  {
-   g_cfg.sessStart = startHour; g_cfg.sessEnd = endHour; g_cfg.sessionText = text;
-  }
-
-// Session windows use GMT; "no session bias" uses server time.
-bool InSession()
+//+------------------------------------------------------------------+
+//| Sessions in each centre's LOCAL time, converted to GMT each day:  |
+//|   Tokyo    09:00-17:00 JST (UTC+9, no DST)       -> 00:00-08:00   |
+//|   London   08:00-17:00 GMT/BST (UK DST rules)    -> 08-17 / 07-16 |
+//|   New York 08:00-17:00 EST/EDT (US DST rules)    -> 13-22 / 12-21 |
+//| UK DST: last Sunday Mar 01:00 UTC -> last Sunday Oct 01:00 UTC.   |
+//| US DST: 2nd Sunday Mar 07:00 UTC -> 1st Sunday Nov 06:00 UTC.     |
+//| During the 2-3 weeks a year when the US and UK are out of step,   |
+//| each session still follows its own city.                          |
+//+------------------------------------------------------------------+
+datetime UtcDate(int y, int m, int d, int h)
   {
    MqlDateTime t;
+   ZeroMemory(t);
+   t.year = y; t.mon = m; t.day = d; t.hour = h;
+   return StructToTime(t);
+  }
+
+int DayOfWeek(int y, int m, int d)
+  {
+   MqlDateTime t;
+   TimeToStruct(UtcDate(y, m, d, 0), t);
+   return t.day_of_week; // 0 = Sunday
+  }
+
+datetime NthSunday(int y, int m, int n, int hourUtc)
+  {
+   int first = 1 + (7 - DayOfWeek(y, m, 1)) % 7;
+   return UtcDate(y, m, first + 7 * (n - 1), hourUtc);
+  }
+
+datetime LastSunday(int y, int m, int hourUtc) // March and October have 31 days
+  {
+   return UtcDate(y, m, 31 - DayOfWeek(y, m, 31), hourUtc);
+  }
+
+bool UkDst(datetime utc)
+  {
+   MqlDateTime t; TimeToStruct(utc, t);
+   return utc >= LastSunday(t.year, 3, 1) && utc < LastSunday(t.year, 10, 1);
+  }
+
+bool UsDst(datetime utc)
+  {
+   MqlDateTime t; TimeToStruct(utc, t);
+   return utc >= NthSunday(t.year, 3, 2, 7) && utc < NthSunday(t.year, 11, 1, 6);
+  }
+
+int LondonOffsetMin(datetime utc) { return UkDst(utc) ? 60 : 0; }
+int NewYorkOffsetMin(datetime utc) { return UsDst(utc) ? -240 : -300; }
+
+// Window in minutes of the day; GMT for sessions, server time for "no session bias".
+void SessionWindow(int &startMin, int &endMin)
+  {
+   datetime now = TimeGMT();
+   int tkO = 0,                                   tkC = 8 * 60;                          // Tokyo 09-17 JST
+   int lnO = 8 * 60 - LondonOffsetMin(now),       lnC = 17 * 60 - LondonOffsetMin(now);  // London 08-17 local
+   int nyO = 8 * 60 - NewYorkOffsetMin(now),      nyC = 17 * 60 - NewYorkOffsetMin(now); // New York 08-17 local
+   switch(InpSession)
+     {
+      case SESSION_ASIAN:        startMin = tkO; endMin = tkC; break;
+      case SESSION_LONDON:       startMin = lnO; endMin = lnC; break;
+      case SESSION_NY:           startMin = nyO; endMin = nyC; break;
+      case SESSION_LONDON_NY:    startMin = lnO; endMin = nyC; break;
+      case SESSION_ASIAN_LONDON: startMin = tkO; endMin = lnC; break;
+      case SESSION_NY_ASIAN:     startMin = nyO; endMin = tkC; break; // wraps midnight
+      default:                   startMin = InpStartHour * 60; endMin = InpEndHour * 60; break;
+     }
+   startMin = ((startMin % 1440) + 1440) % 1440;
+   endMin   = ((endMin % 1440) + 1440) % 1440;
+  }
+
+bool InSession()
+  {
+   int s, e;
+   SessionWindow(s, e);
+   MqlDateTime t;
    TimeToStruct(InpSession == SESSION_NONE ? TimeCurrent() : TimeGMT(), t);
-   int s = g_cfg.sessStart, e = g_cfg.sessEnd, h = t.hour;
+   int m = t.hour * 60 + t.min;
    if(s == e) return true;
-   return s < e ? (h >= s && h < e) : (h >= s || h < e); // window may wrap midnight
+   return s < e ? (m >= s && m < e) : (m >= s || m < e); // window may wrap midnight
+  }
+
+string HhMm(int minutes) { return StringFormat("%02d:%02d", minutes / 60, minutes % 60); }
+
+string SessionWindowText()
+  {
+   int s, e;
+   SessionWindow(s, e);
+   return HhMm(s) + "-" + HhMm(e) + (InpSession == SESSION_NONE ? " server" : " GMT");
+  }
+
+string LocalClocks()
+  {
+   datetime now = TimeGMT();
+   MqlDateTime g, l, n, k;
+   TimeToStruct(now, g);
+   TimeToStruct(now + LondonOffsetMin(now) * 60, l);
+   TimeToStruct(now + NewYorkOffsetMin(now) * 60, n);
+   TimeToStruct(now + 9 * 3600, k);
+   return StringFormat("%02d:%02d GMT | London %02d:%02d %s | New York %02d:%02d %s | Tokyo %02d:%02d JST",
+                       g.hour, g.min, l.hour, l.min, UkDst(now) ? "BST" : "GMT",
+                       n.hour, n.min, UsDst(now) ? "EDT" : "EST", k.hour, k.min);
   }
 
 string ModeName()
@@ -431,17 +508,17 @@ string SessionName()
   }
 string ProfileName()
   {
-   string n[] = {"Passive", "Conservative", "Balanced", "Aggressive"};
+   string n[] = {"Conservative", "Balanced", "Aggressive"};
    return n[(int)InpRiskProfile];
   }
 
 // Prepended to every AI system prompt so all stages share the same style.
 string ProfileBrief()
   {
-   MqlDateTime g; TimeToStruct(TimeGMT(), g);
-   return StringFormat("TRADING STYLE - %s RISK PROFILE - %s SESSION - %s Current time %02d:%02d GMT. "
+   return StringFormat("TRADING STYLE - %s RISK PROFILE - %s SESSION - %s Today's window: %s. Time now: %s. "
                        "Risk per trade is capped at %.2f%% of equity; minimum reward:risk %.1f.",
-                       g_cfg.styleText, g_cfg.profileText, g_cfg.sessionText, g.hour, g.min, g_cfg.riskPct, g_cfg.minRR);
+                       g_cfg.styleText, g_cfg.profileText, g_cfg.sessionText, SessionWindowText(), LocalClocks(),
+                       g_cfg.riskPct, g_cfg.minRR);
   }
 
 //+------------------------------------------------------------------+
@@ -1458,8 +1535,9 @@ void UpdateDashboard()
   {
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
    string s = "AITraderEA  |  AI: " + ProviderChain() + "  |  last: " + g_lastProvider + (InpDryRun ? "  |  DRY RUN" : "  |  LIVE") + "\n";
-   s += StringFormat("Mode: %s  |  Session: %s (%s)  |  Profile: %s\n", ModeName(), SessionName(),
-                     InSession() ? "open" : "closed", ProfileName());
+   s += StringFormat("Mode: %s  |  Session: %s %s (%s)  |  Profile: %s\n", ModeName(), SessionName(),
+                     SessionWindowText(), InSession() ? "open" : "closed", ProfileName());
+   s += "Clocks: " + LocalClocks() + "\n";
    s += StringFormat("Watchlist: %d symbols  |  Scan TF %s, manage TF %s  |  Risk/trade %.2f%%, min conf %.2f, min R:R %.1f\n",
                      ArraySize(g_syms), TfName(g_cfg.scanTF), TfName(g_cfg.manageTF), g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR);
    s += StringFormat("Day P/L: %.2f%%  |  Open risk: %.2f%% / %.2f%%  |  Positions: %d / %d  |  Trades today: %d / %d\n",
