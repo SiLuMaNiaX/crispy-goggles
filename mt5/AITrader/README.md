@@ -14,7 +14,25 @@ Each AI call tries the providers in this order:
 
 - A provider counts as failed if it times out, returns an HTTP error, or replies without JSON. The EA then moves straight to the next provider, and skips the failed one for *Skip a failed provider for N minutes* (10 by default), so you don't wait on a timeout for every call.
 - A provider without a key is left out of the chain. The EA only refuses to start if no provider has a key.
-- The per-stage model overrides (*Primary model for SCAN / ENTRY / MANAGE*) apply only to the primary provider. The backups always use their own *Model* input.
+### Multi-model setup: each provider has a job
+
+| Stage | Runs on (default) | Why |
+|---|---|---|
+| SCAN (each H1 bar) | **DeepSeek** | Runs often and ranks a table; a cheap, fast model is enough |
+| ENTRY | **asAi** (primary) | The decision that commits money; give it your strongest model |
+| ENTRY second opinion | **the next provider that is not the one that answered** (usually DeepSeek or OpenRouter) | An independent check, so one model cannot open a trade on its own |
+| MANAGE (each M15 bar, per position) | **DeepSeek** | High volume; HOLD is the usual answer |
+
+Each stage still fails over to the other providers when its first choice is down. You can change the routing in *Multi-model routing*.
+
+**Entry consensus** (*ENTRY needs a 2nd model to agree*, on by default): after the first model proposes a BUY or SELL, a model from a **different provider** gets the same data and is told to judge it independently.
+- If it says HOLD, the opposite direction, or something that can't be parsed, the trade is **rejected**, and the log records both opinions.
+- If it agrees, the trade uses the **lower** confidence and the **lower** risk % of the two models, plus the first model's SL/TP. Those then go through the hard-limit checks as usual.
+- If no second provider is reachable, the default is to trade on the single opinion. Set *If no 2nd provider is available: true = skip trade* to skip the trade instead.
+
+Each trade with consensus costs 2 entry calls. For the most independent second opinion, use a different model family on the reviewing provider, for example a Claude or GPT model through OpenRouter (*Provider 3 → Model slug*) while asAi/DeepSeek run DeepSeek models.
+
+- The per-stage model overrides (*Primary model for SCAN / ENTRY / MANAGE*) apply only when asAi answers. The backups always use their own *Model* input.
 - The dashboard shows the chain (`asAi > DeepSeek > OpenRouter`, with `(down)` next to any provider that is being skipped) and which provider/model answered last.
 
 ```

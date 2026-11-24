@@ -17,6 +17,13 @@
 
 #include <Trade/Trade.mqh>
 
+enum ENUM_AI_ROUTE
+  {
+   ROUTE_PRIMARY    = 0, // Primary (asAi) first
+   ROUTE_DEEPSEEK   = 1, // DeepSeek first
+   ROUTE_OPENROUTER = 2  // OpenRouter first
+  };
+
 //=== Inputs ==========================================================
 // Providers are tried in order: Primary (asAi) -> Backup 1 (DeepSeek) -> Backup 2 (OpenRouter).
 // A provider that fails is skipped for InpFailoverCooldownMin minutes.
@@ -42,6 +49,13 @@ input bool             InpP3Enabled       = true;                    // Enabled
 input string           InpP3Key           = "";                      // API key (empty = read key file)
 input string           InpP3KeyFile       = "aitrader_key_openrouter.txt"; // Key file in <Common>\Files
 input string           InpP3Model         = "deepseek/deepseek-chat"; // Model slug
+
+input group "Multi-model routing"
+input ENUM_AI_ROUTE    InpRouteScan       = ROUTE_DEEPSEEK;          // SCAN runs on (others = failover)
+input ENUM_AI_ROUTE    InpRouteEntry      = ROUTE_PRIMARY;           // ENTRY runs on (others = failover)
+input ENUM_AI_ROUTE    InpRouteManage     = ROUTE_DEEPSEEK;          // MANAGE runs on (others = failover)
+input bool             InpEntryConsensus  = true;                    // ENTRY needs a 2nd model (different provider) to agree
+input bool             InpConsensusStrict = false;                   // If no 2nd provider is available: true = skip trade
 
 input group "AI request settings"
 input int              InpFailoverCooldownMin = 10;                  // Skip a failed provider for N minutes
@@ -272,7 +286,8 @@ void ScanAndEnter()
                               TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), PositionsSummary(), table);
 
    string content;
-   if(!CallAI(InpModelScan, system, user, content)) { g_lastScan = "AI call failed"; return; }
+   string used;
+   if(!CallAI(InpRouteScan, InpModelScan, system, user, content, used, "")) { g_lastScan = "AI call failed"; return; }
 
    string obj = ExtractJsonObject(content);
    string cands[];
@@ -359,12 +374,44 @@ void EvaluateEntry(int idx, string bias, double score, string note)
    string user = SymbolContext(idx) + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
-   string content;
-   if(!CallAI(InpModelEntry, system, user, content)) return;
+   string content, used;
+   if(!CallAI(InpRouteEntry, InpModelEntry, system, user, content, used, "")) return;
 
    EntryDecision d;
    if(!ParseEntry(content, d))
-     { LogRow("ENTRY", sym, "PARSE_ERROR", 0, 0, 0, 0, 0, "", StringSubstr(content, 0, 200)); return; }
+     { LogRow("ENTRY", sym, "PARSE_ERROR", 0, 0, 0, 0, 0, used, StringSubstr(content, 0, 200)); return; }
+   d.reason = used + ": " + d.reason;
+
+   // Second opinion from a DIFFERENT provider before any trade
+   if(InpEntryConsensus && (d.action == "BUY" || d.action == "SELL") && d.confidence >= InpMinConfidence)
+     {
+      string system2 = system + " You are the independent second reviewer: judge the data yourself; do not assume "
+                       "the scanner is right. Reject marginal setups.";
+      string content2, used2;
+      if(!CallAI(InpRouteEntry, "", system2, user, content2, used2, used))
+        {
+         if(InpConsensusStrict)
+           { LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: no 2nd model available", d.reason); return; }
+         Notify(sym + ": no 2nd model available, using single-model decision");
+        }
+      else
+        {
+         EntryDecision d2;
+         if(!ParseEntry(content2, d2) || d2.action != d.action)
+           {
+            string why = StringFormat("no consensus: %s says %s, %s says %s", used, d.action, used2,
+                                      d2.action == "" ? "unparseable" : d2.action);
+            Notify(sym + " " + why);
+            LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: " + why,
+                   d.reason + " | " + used2 + ": " + d2.reason);
+            return;
+           }
+         // Agreement: be as cautious as the more cautious model
+         d.confidence = MathMin(d.confidence, d2.confidence);
+         d.risk_pct   = MathMin(d.risk_pct, d2.risk_pct);
+         d.reason     = d.reason + " | " + used2 + " agrees: " + d2.reason;
+        }
+     }
    ExecuteEntry(idx, d, remaining);
   }
 
@@ -479,7 +526,8 @@ void ManageOne(ulong ticket)
    user += SymbolContext(idx);
 
    string content;
-   if(!CallAI(InpModelManage, system, user, content)) return;
+   string used;
+   if(!CallAI(InpRouteManage, InpModelManage, system, user, content, used, "")) return;
 
    ManageDecision m;
    if(!ParseManage(content, m))
@@ -713,28 +761,49 @@ string HostOf(string url)
    return q > 0 ? StringSubstr(url, 0, q) : url;
   }
 
-// Try providers in order. The per-stage model override applies to the primary only.
-bool CallAI(string stageModel, string system, string user, string &content)
+string RouteName(ENUM_AI_ROUTE r)
   {
-   content = "";
-   int n = ArraySize(g_prov);
-   bool anyUp = false; // if every provider is cooling down, try them all rather than go blind
-   for(int i = 0; i < n; i++) if(g_prov[i].downUntil <= TimeCurrent()) anyUp = true;
+   if(r == ROUTE_DEEPSEEK)   return "DeepSeek";
+   if(r == ROUTE_OPENROUTER) return "OpenRouter";
+   return InpP1Name;
+  }
 
+// Try the routed provider first, then the others in chain order, skipping 'exclude'.
+// The per-stage model override applies only when the primary (asAi) answers.
+// 'used' receives the name of the provider that answered.
+bool CallAI(ENUM_AI_ROUTE route, string stageModel, string system, string user, string &content,
+            string &used, string exclude)
+  {
+   content = ""; used = "";
+   int n = ArraySize(g_prov);
+   int order[];
+   ArrayResize(order, 0);
+   string first = RouteName(route);
+   for(int i = 0; i < n; i++) if(g_prov[i].name == first) { ArrayResize(order, 1); order[0] = i; }
    for(int i = 0; i < n; i++)
+      if(g_prov[i].name != first) { int k = ArraySize(order); ArrayResize(order, k + 1); order[k] = i; }
+
+   bool anyUp = false; // if every candidate is cooling down, try them all rather than go blind
+   for(int k = 0; k < ArraySize(order); k++)
+      if(g_prov[order[k]].name != exclude && g_prov[order[k]].downUntil <= TimeCurrent()) anyUp = true;
+
+   for(int k = 0; k < ArraySize(order); k++)
      {
+      int i = order[k];
+      if(g_prov[i].name == exclude) continue;
       if(anyUp && g_prov[i].downUntil > TimeCurrent()) continue;
       if(g_calls >= InpMaxAICallsDay) { Print("AITrader: daily AI call budget reached"); return false; }
-      string model = (i == 0 && stageModel != "") ? stageModel : g_prov[i].model;
+      string model = (g_prov[i].name == InpP1Name && stageModel != "") ? stageModel : g_prov[i].model;
       string err = "";
       if(CallProvider(g_prov[i], model, system, user, content, err))
         {
          g_prov[i].downUntil = 0;
+         used = g_prov[i].name;
          g_lastProvider = g_prov[i].name + "/" + model;
          return true;
         }
       g_prov[i].downUntil = TimeCurrent() + InpFailoverCooldownMin * 60;
-      Notify(StringFormat("%s failed (%s)%s", g_prov[i].name, err, i + 1 < n ? " - failing over" : ""));
+      Notify(StringFormat("%s failed (%s)%s", g_prov[i].name, err, k + 1 < ArraySize(order) ? " - failing over" : ""));
      }
    return false;
   }
