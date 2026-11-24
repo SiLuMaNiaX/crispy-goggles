@@ -17,6 +17,17 @@
 
 #include <Trade/Trade.mqh>
 
+// Dashboard panel
+#define PANEL_PREFIX "AITraderPanel_"
+#define CLR_PANEL_BG     C'16,20,28'
+#define CLR_PANEL_BORDER C'60,72,96'
+#define CLR_TITLE        C'0,190,255'
+#define CLR_HEAD         C'130,140,160'
+#define CLR_TEXT         C'225,228,235'
+#define CLR_GOOD         C'60,200,120'
+#define CLR_BAD          C'240,80,80'
+#define CLR_WARN         C'255,190,60'
+
 enum ENUM_AI_ROUTE
   {
    ROUTE_PRIMARY    = 0, // Primary (asAi) first
@@ -137,6 +148,13 @@ input int              InpSlippagePts     = 30;                      // Max slip
 input int              InpTimerSec        = 0;                       // Timer interval seconds (0 = mode default)
 input string           InpLogFile         = "AITraderEA_log.csv";    // Log file in MQL5\Files
 
+input group "Dashboard panel"
+input bool             InpShowPanel       = true;                    // Show dashboard panel
+input int              InpPanelX          = 8;                       // Panel X offset (px from left)
+input int              InpPanelY          = 100;                     // Panel Y offset (px from top; clears one-click trading)
+input int              InpPanelFontSize   = 9;                       // Panel font size
+input int              InpPanelWrapChars  = 95;                      // Wrap long lines after N characters
+
 //=== Types ===========================================================
 struct EntryDecision
   {
@@ -249,6 +267,7 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_hATR[i]); IndicatorRelease(g_hRSI[i]);
       IndicatorRelease(g_hE20[i]); IndicatorRelease(g_hE50[i]); IndicatorRelease(g_hE200[i]);
      }
+   ObjectsDeleteAll(0, PANEL_PREFIX);
    Comment("");
   }
 
@@ -1568,21 +1587,130 @@ void LogRow(string stage, string sym, string action, double conf, double risk, d
    FileClose(h);
   }
 
+//+------------------------------------------------------------------+
+//| Dashboard panel: dark rectangle + one label per line              |
+//+------------------------------------------------------------------+
+
+string g_pTxt[];
+color  g_pClr[];
+
+void PanelAdd(string text, color c)
+  {
+   int n = ArraySize(g_pTxt);
+   ArrayResize(g_pTxt, n + 1); ArrayResize(g_pClr, n + 1);
+   g_pTxt[n] = text; g_pClr[n] = c;
+  }
+
+// Adds 'text' under a short heading, wrapping long text onto indented lines.
+void PanelAddWrapped(string head, string text, color c)
+  {
+   string pad = "            ";
+   string prefix = StringSubstr(head + pad, 0, 11) + " ";
+   int width = MathMax(30, InpPanelWrapChars - 12);
+   while(StringLen(text) > width)
+     {
+      int cut = width;
+      for(int i = width; i > width / 2; i--)
+         if(StringGetCharacter(text, i) == ' ') { cut = i; break; }
+      PanelAdd(prefix + StringSubstr(text, 0, cut), c);
+      text = StringSubstr(text, cut);
+      StringTrimLeft(text);
+      prefix = StringSubstr(pad, 0, 12);
+     }
+   PanelAdd(prefix + text, c);
+  }
+
 void UpdateDashboard()
   {
+   if(!InpShowPanel) { ObjectsDeleteAll(0, PANEL_PREFIX); return; }
+   ArrayResize(g_pTxt, 0); ArrayResize(g_pClr, 0);
+
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   string s = "AITraderEA  |  AI: " + ProviderChain() + "  |  last: " + g_lastProvider + (InpDryRun ? "  |  DRY RUN" : "  |  LIVE") + "\n";
-   s += StringFormat("Mode: %s  |  Session: %s %s (%s)  |  Profile: %s\n", ModeName(), SessionName(),
-                     SessionWindowText(), InSession() ? "open" : "closed", ProfileName());
-   s += "Clocks: " + LocalClocks() + "\n";
-   s += StringFormat("Watchlist: %d symbols  |  Scan TF %s, manage TF %s  |  Risk/trade %.2f%%, min conf %.2f, min R:R %.1f\n",
-                     ArraySize(g_syms), TfName(g_cfg.scanTF), TfName(g_cfg.manageTF), g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR);
-   s += StringFormat("Day P/L: %.2f%%  |  Open risk: %.2f%% / %.2f%%  |  Positions: %d / %d  |  Trades today: %d / %d\n",
-                     dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0, OpenRiskPct(), InpMaxTotalRiskPct,
-                     CountPositions(), g_cfg.maxPositions, CountTodayEntries(), g_cfg.maxTradesDay);
-   s += StringFormat("AI calls today: %d / %d%s\n", g_calls, g_cfg.maxCalls, g_haltedToday ? "  |  HALTED (daily loss)" : "");
-   s += "Last scan: " + g_lastScan + "\n";
-   s += "Last event: " + g_lastEvent;
-   Comment(s);
+   double dayPct = dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0;
+   string status = g_haltedToday ? "HALTED - daily loss limit" : (InpDryRun ? "DRY RUN - no orders sent" : "LIVE TRADING");
+   color  stClr  = g_haltedToday ? CLR_BAD : (InpDryRun ? CLR_WARN : CLR_BAD);
+
+   PanelAdd("AI TRADER EA", CLR_TITLE);
+   PanelAdd(status, stClr);
+   PanelAdd("", CLR_TEXT);
+   PanelAddWrapped("STRATEGY", StringFormat("%s | %s | %s", ModeName(), ProfileName(),
+                   StringFormat("%s session %s", SessionName(), SessionWindowText())), CLR_TEXT);
+   PanelAddWrapped("SESSION", InSession() ? "OPEN - entries allowed" : "CLOSED - no new entries",
+                   InSession() ? CLR_GOOD : CLR_WARN);
+   PanelAddWrapped("CLOCKS", LocalClocks(), CLR_HEAD);
+   PanelAddWrapped("AI", StringFormat("%s | last: %s | calls %d/%d", ProviderChain(), g_lastProvider,
+                   g_calls, g_cfg.maxCalls), g_calls >= g_cfg.maxCalls ? CLR_BAD : CLR_TEXT);
+   PanelAddWrapped("TIMEFRAMES", StringFormat("scan %s, manage %s | %d symbols", TfName(g_cfg.scanTF),
+                   TfName(g_cfg.manageTF), ArraySize(g_syms)), CLR_TEXT);
+   PanelAddWrapped("LIMITS", StringFormat("risk/trade %.2f%% | min conf %.2f | min R:R %.1f | daily loss %.1f%%",
+                   g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR, InpMaxDailyLossPct), CLR_TEXT);
+   PanelAddWrapped("DAY P/L", StringFormat("%+.2f%%", dayPct), dayPct > 0 ? CLR_GOOD : (dayPct < 0 ? CLR_BAD : CLR_TEXT));
+   double openRisk = OpenRiskPct();
+   PanelAddWrapped("EXPOSURE", StringFormat("open risk %.2f%% / %.2f%% | positions %d/%d | trades today %d/%d",
+                   openRisk, InpMaxTotalRiskPct, CountPositions(), g_cfg.maxPositions,
+                   CountTodayEntries(), g_cfg.maxTradesDay),
+                   openRisk >= InpMaxTotalRiskPct - 0.01 ? CLR_WARN : CLR_TEXT);
+   PanelAdd("", CLR_TEXT);
+   PanelAddWrapped("LAST SCAN", g_lastScan, CLR_TEXT);
+   PanelAddWrapped("LAST EVENT", g_lastEvent, CLR_HEAD);
+   DrawPanel();
   }
+
+void DrawPanel()
+  {
+   int n = ArraySize(g_pTxt);
+   int pad = 10;
+   TextSetFont("Consolas", -InpPanelFontSize * 10);
+   uint w = 0, h = 0;
+   int maxW = 0, lineH = 0;
+   for(int i = 0; i < n; i++)
+     {
+      TextGetSize(g_pTxt[i] == "" ? " " : g_pTxt[i], w, h);
+      if((int)w > maxW)  maxW = (int)w;
+      if((int)h > lineH) lineH = (int)h;
+     }
+   lineH += 3;
+
+   string bg = PANEL_PREFIX + "bg";
+   if(ObjectFind(0, bg) < 0)
+     {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
+     }
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, InpPanelX);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, InpPanelY);
+   ObjectSetInteger(0, bg, OBJPROP_XSIZE, maxW + 2 * pad);
+   ObjectSetInteger(0, bg, OBJPROP_YSIZE, n * lineH + 2 * pad - 3);
+   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, CLR_PANEL_BG);
+   ObjectSetInteger(0, bg, OBJPROP_COLOR, CLR_PANEL_BORDER);
+
+   for(int i = 0; i < n; i++)
+     {
+      string name = PANEL_PREFIX + "L" + IntegerToString(i);
+      if(ObjectFind(0, name) < 0)
+        {
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+         ObjectSetInteger(0, name, OBJPROP_BACK, false);
+         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+         ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+        }
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpPanelFontSize);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, InpPanelX + pad);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, InpPanelY + pad + i * lineH);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, g_pClr[i]);
+      ObjectSetString(0, name, OBJPROP_TEXT, g_pTxt[i] == "" ? " " : g_pTxt[i]);
+     }
+   // remove labels left over from a longer previous frame
+   for(int i = n; ObjectFind(0, PANEL_PREFIX + "L" + IntegerToString(i)) >= 0; i++)
+      ObjectDelete(0, PANEL_PREFIX + "L" + IntegerToString(i));
+   ChartRedraw(0);
+  }
+
 //+------------------------------------------------------------------+
