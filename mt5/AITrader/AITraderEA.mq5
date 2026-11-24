@@ -17,25 +17,38 @@
 
 #include <Trade/Trade.mqh>
 
-enum ENUM_AI_PROVIDER
-  {
-   PROVIDER_OPENROUTER = 0, // OpenRouter (https://openrouter.ai)
-   PROVIDER_DEEPSEEK   = 1  // DeepSeek   (https://api.deepseek.com)
-  };
-
 //=== Inputs ==========================================================
-input group "AI provider"
-input ENUM_AI_PROVIDER InpProvider        = PROVIDER_DEEPSEEK;       // Provider
-input string           InpApiKey          = "";                      // API key (empty = read key file)
-input string           InpApiKeyFile      = "aitrader_key.txt";      // Key file in <Common>\Files
-input string           InpModel           = "deepseek-chat";         // Default model (OpenRouter: e.g. deepseek/deepseek-chat)
-input string           InpModelScan       = "";                      // Model for SCAN (empty = default)
-input string           InpModelEntry      = "";                      // Model for ENTRY (empty = default)
-input string           InpModelManage     = "";                      // Model for MANAGE (empty = default)
+// Providers are tried in order: Primary (asAi) -> Backup 1 (DeepSeek) -> Backup 2 (OpenRouter).
+// A provider that fails is skipped for InpFailoverCooldownMin minutes.
+input group "AI provider 1 - PRIMARY (asAi, OpenAI-compatible)"
+input bool             InpP1Enabled       = true;                    // Enabled
+input string           InpP1Name          = "asAi";                  // Name (for logs)
+input string           InpP1Url           = "https://serveras.click/v1/chat/completions"; // Chat completions URL
+input string           InpP1Key           = "";                      // API key (empty = read key file)
+input string           InpP1KeyFile       = "aitrader_key_asai.txt"; // Key file in <Common>\Files
+input string           InpP1Model         = "deepseek-chat";         // Model id (copy from asAi > Models)
+input string           InpModelScan       = "";                      // Primary model for SCAN (empty = Model id)
+input string           InpModelEntry      = "";                      // Primary model for ENTRY (empty = Model id)
+input string           InpModelManage     = "";                      // Primary model for MANAGE (empty = Model id)
+
+input group "AI provider 2 - BACKUP (DeepSeek)"
+input bool             InpP2Enabled       = true;                    // Enabled
+input string           InpP2Key           = "";                      // API key (empty = read key file)
+input string           InpP2KeyFile       = "aitrader_key_deepseek.txt"; // Key file in <Common>\Files
+input string           InpP2Model         = "deepseek-chat";         // Model
+
+input group "AI provider 3 - BACKUP (OpenRouter)"
+input bool             InpP3Enabled       = true;                    // Enabled
+input string           InpP3Key           = "";                      // API key (empty = read key file)
+input string           InpP3KeyFile       = "aitrader_key_openrouter.txt"; // Key file in <Common>\Files
+input string           InpP3Model         = "deepseek/deepseek-chat"; // Model slug
+
+input group "AI request settings"
+input int              InpFailoverCooldownMin = 10;                  // Skip a failed provider for N minutes
 input double           InpTemperature     = 0.2;                     // Temperature
 input int              InpMaxTokens       = 600;                     // Max response tokens
 input bool             InpJsonMode        = true;                    // Request JSON response_format
-input int              InpTimeoutMs       = 60000;                   // HTTP timeout (ms)
+input int              InpTimeoutMs       = 45000;                   // HTTP timeout per provider (ms)
 input int              InpMaxAICallsDay   = 150;                     // Max AI calls per day (all stages)
 
 input group "Scanner"
@@ -95,9 +108,21 @@ struct ManageDecision
    string            reason;
   };
 
+struct AIProvider
+  {
+   string            name;
+   string            url;
+   string            key;
+   string            model;
+   bool              openrouter;
+   datetime          downUntil;  // skipped until this time after a failure
+  };
+
 //=== Globals =========================================================
+
 CTrade   g_trade;
-string   g_apiKey = "";
+AIProvider g_prov[];
+string   g_lastProvider = "-";
 string   g_syms[];
 int      g_hATR[], g_hRSI[], g_hE20[], g_hE50[], g_hE200[];
 datetime g_lastScanBar = 0, g_lastManageBar = 0, g_day = 0;
@@ -108,11 +133,12 @@ string   g_lastScan = "-", g_lastEvent = "-";
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   g_apiKey = InpApiKey;
-   if(g_apiKey == "") g_apiKey = ReadKeyFile(InpApiKeyFile);
-   if(g_apiKey == "")
+   AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, InpP1KeyFile, InpP1Model, false);
+   AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, InpP2KeyFile, InpP2Model, false);
+   AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, InpP3KeyFile, InpP3Model, true);
+   if(ArraySize(g_prov) == 0)
      {
-      Print("AITrader: no API key. Set the input or put it in <Common>\\Files\\", InpApiKeyFile);
+      Print("AITrader: no usable AI provider (enable one and give it a key or key file)");
       return INIT_PARAMETERS_INCORRECT;
      }
    if(InpMaxRiskPct <= 0 || InpMaxRiskPct > 5 || InpMaxTotalRiskPct < InpMaxRiskPct)
@@ -132,8 +158,8 @@ int OnInit()
    g_lastScanBar   = iTime(_Symbol, InpTimeframe, 0); // first scan on the next bar
    g_lastManageBar = iTime(_Symbol, InpManageTF, 0);
    EventSetTimer(MathMax(5, InpTimerSec));
-   PrintFormat("AITrader started: %d symbols, %s, provider %s, dry run %s",
-               ArraySize(g_syms), EnumToString(InpTimeframe), ProviderName(), InpDryRun ? "ON" : "OFF");
+   PrintFormat("AITrader started: %d symbols, %s, providers %s, dry run %s",
+               ArraySize(g_syms), EnumToString(InpTimeframe), ProviderChain(), InpDryRun ? "ON" : "OFF");
    UpdateDashboard();
    return INIT_SUCCEEDED;
   }
@@ -246,7 +272,7 @@ void ScanAndEnter()
                               TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), PositionsSummary(), table);
 
    string content;
-   if(!CallAI(StageModel(InpModelScan), system, user, content)) { g_lastScan = "AI call failed"; return; }
+   if(!CallAI(InpModelScan, system, user, content)) { g_lastScan = "AI call failed"; return; }
 
    string obj = ExtractJsonObject(content);
    string cands[];
@@ -334,7 +360,7 @@ void EvaluateEntry(int idx, string bias, double score, string note)
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
    string content;
-   if(!CallAI(StageModel(InpModelEntry), system, user, content)) return;
+   if(!CallAI(InpModelEntry, system, user, content)) return;
 
    EntryDecision d;
    if(!ParseEntry(content, d))
@@ -453,7 +479,7 @@ void ManageOne(ulong ticket)
    user += SymbolContext(idx);
 
    string content;
-   if(!CallAI(StageModel(InpModelManage), system, user, content)) return;
+   if(!CallAI(InpModelManage, system, user, content)) return;
 
    ManageDecision m;
    if(!ParseManage(content, m))
@@ -661,17 +687,61 @@ double OpenRiskPct()
 //+------------------------------------------------------------------+
 //| AI HTTP client (OpenAI-compatible chat completions)               |
 //+------------------------------------------------------------------+
-string ProviderName() { return InpProvider == PROVIDER_OPENROUTER ? "OpenRouter" : "DeepSeek"; }
-string StageModel(string m) { return m == "" ? InpModel : m; }
+void AddProvider(bool enabled, string name, string url, string key, string keyFile, string model, bool openrouter)
+  {
+   if(!enabled) return;
+   if(key == "") key = ReadKeyFile(keyFile);
+   if(key == "") { PrintFormat("AITrader: %s skipped - no key (input empty and <Common>\\Files\\%s missing)", name, keyFile); return; }
+   int n = ArraySize(g_prov);
+   ArrayResize(g_prov, n + 1);
+   g_prov[n].name = name; g_prov[n].url = url; g_prov[n].key = key;
+   g_prov[n].model = model; g_prov[n].openrouter = openrouter; g_prov[n].downUntil = 0;
+  }
 
-bool CallAI(string model, string system, string user, string &content)
+string ProviderChain()
+  {
+   string s = "";
+   for(int i = 0; i < ArraySize(g_prov); i++)
+      s += (i > 0 ? " > " : "") + g_prov[i].name + (g_prov[i].downUntil > TimeCurrent() ? "(down)" : "");
+   return s;
+  }
+
+string HostOf(string url)
+  {
+   int p = StringFind(url, "://");
+   int q = StringFind(url, "/", p < 0 ? 0 : p + 3);
+   return q > 0 ? StringSubstr(url, 0, q) : url;
+  }
+
+// Try providers in order. The per-stage model override applies to the primary only.
+bool CallAI(string stageModel, string system, string user, string &content)
   {
    content = "";
-   if(g_calls >= InpMaxAICallsDay) { Print("AITrader: daily AI call budget reached"); return false; }
-   g_calls++;
+   int n = ArraySize(g_prov);
+   bool anyUp = false; // if every provider is cooling down, try them all rather than go blind
+   for(int i = 0; i < n; i++) if(g_prov[i].downUntil <= TimeCurrent()) anyUp = true;
 
-   string url = InpProvider == PROVIDER_OPENROUTER ? "https://openrouter.ai/api/v1/chat/completions"
-                                                   : "https://api.deepseek.com/chat/completions";
+   for(int i = 0; i < n; i++)
+     {
+      if(anyUp && g_prov[i].downUntil > TimeCurrent()) continue;
+      if(g_calls >= InpMaxAICallsDay) { Print("AITrader: daily AI call budget reached"); return false; }
+      string model = (i == 0 && stageModel != "") ? stageModel : g_prov[i].model;
+      string err = "";
+      if(CallProvider(g_prov[i], model, system, user, content, err))
+        {
+         g_prov[i].downUntil = 0;
+         g_lastProvider = g_prov[i].name + "/" + model;
+         return true;
+        }
+      g_prov[i].downUntil = TimeCurrent() + InpFailoverCooldownMin * 60;
+      Notify(StringFormat("%s failed (%s)%s", g_prov[i].name, err, i + 1 < n ? " - failing over" : ""));
+     }
+   return false;
+  }
+
+bool CallProvider(AIProvider &p, string model, string system, string user, string &content, string &err)
+  {
+   g_calls++;
    string body = "{\"model\":\"" + JsonEscape(model) + "\",";
    body += "\"temperature\":" + DoubleToString(InpTemperature, 2) + ",";
    body += "\"max_tokens\":" + IntegerToString(InpMaxTokens) + ",";
@@ -679,8 +749,8 @@ bool CallAI(string model, string system, string user, string &content)
    body += "\"messages\":[{\"role\":\"system\",\"content\":\"" + JsonEscape(system) + "\"},";
    body += "{\"role\":\"user\",\"content\":\"" + JsonEscape(user) + "\"}]}";
 
-   string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + g_apiKey + "\r\n";
-   if(InpProvider == PROVIDER_OPENROUTER) headers += "X-Title: AITraderEA\r\n";
+   string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + p.key + "\r\n";
+   if(p.openrouter) headers += "X-Title: AITraderEA\r\n";
 
    char data[], result[];
    int len = StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
@@ -689,31 +759,29 @@ bool CallAI(string model, string system, string user, string &content)
 
    ResetLastError();
    uint t0 = GetTickCount();
-   int code = WebRequest("POST", url, headers, InpTimeoutMs, data, result, resHeaders);
+   int code = WebRequest("POST", p.url, headers, InpTimeoutMs, data, result, resHeaders);
    if(code == -1)
      {
-      int err = GetLastError();
-      if(err == 4014)
-         Notify("WebRequest blocked: add " + (InpProvider == PROVIDER_OPENROUTER ? "https://openrouter.ai" : "https://api.deepseek.com") +
-               " in Tools > Options > Expert Advisors");
-      else
-         Notify(StringFormat("WebRequest error %d", err));
+      int e = GetLastError();
+      err = (e == 4014) ? "URL not allowed: add " + HostOf(p.url) + " in Tools > Options > Expert Advisors"
+                        : StringFormat("WebRequest error %d (timeout or network)", e);
       return false;
      }
    string resp = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
    if(code != 200)
      {
-      Notify(StringFormat("HTTP %d from %s", code, ProviderName()));
-      Print("AITrader: ", StringSubstr(resp, 0, 500));
+      err = StringFormat("HTTP %d", code);
+      Print("AITrader: ", p.name, " response: ", StringSubstr(resp, 0, 400));
       return false;
      }
-   int p = JsonValueStart(resp, "content", StringFind(resp, "\"choices\""));
-   if(p < 0 || !JsonReadString(resp, p, content))
+   int pos = JsonValueStart(resp, "content", StringFind(resp, "\"choices\""));
+   if(pos < 0 || !JsonReadString(resp, pos, content) || StringFind(content, "{") < 0)
      {
-      Print("AITrader: no content in response: ", StringSubstr(resp, 0, 500));
+      err = "no JSON content in reply";
+      Print("AITrader: ", p.name, " response: ", StringSubstr(resp, 0, 400));
       return false;
      }
-   PrintFormat("AITrader: %s replied in %.1fs", model, (GetTickCount() - t0) / 1000.0);
+   PrintFormat("AITrader: %s/%s replied in %.1fs", p.name, model, (GetTickCount() - t0) / 1000.0);
    return true;
   }
 
@@ -1093,7 +1161,7 @@ void LogRow(string stage, string sym, string action, double conf, double risk, d
 void UpdateDashboard()
   {
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   string s = "AITraderEA  |  " + ProviderName() + " / " + InpModel + (InpDryRun ? "  |  DRY RUN" : "  |  LIVE") + "\n";
+   string s = "AITraderEA  |  AI: " + ProviderChain() + "  |  last: " + g_lastProvider + (InpDryRun ? "  |  DRY RUN" : "  |  LIVE") + "\n";
    s += StringFormat("Watchlist: %d symbols  |  Scan TF %s, manage TF %s\n", ArraySize(g_syms), TfName(InpTimeframe), TfName(InpManageTF));
    s += StringFormat("Day P/L: %.2f%%  |  Open risk: %.2f%% / %.2f%%  |  Positions: %d / %d  |  Trades today: %d / %d\n",
                      dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0, OpenRiskPct(), InpMaxTotalRiskPct,
