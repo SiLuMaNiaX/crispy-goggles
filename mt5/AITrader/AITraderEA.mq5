@@ -220,6 +220,7 @@ RuntimeConfig g_cfg;
 CTrade   g_trade;
 AIProvider g_prov[];
 string   g_lastProvider = "-";
+string   g_scanSkipped = "";
 string   g_syms[];
 int      g_hATR[], g_hRSI[], g_hE20[], g_hE50[], g_hE200[];
 datetime g_lastScanBar = 0, g_lastManageBar = 0, g_day = 0;
@@ -591,12 +592,15 @@ void ScanAndEnter()
    // Build the scanner table from local indicators
    string table = "symbol,price,change_pct_24bars,atr_pct,rsi14,ema_trend,range_pos_50bars_pct,spread_atr,has_open_position\n";
    int rows = 0;
+   g_scanSkipped = "";
    for(int i = 0; i < ArraySize(g_syms); i++)
      {
       string row = ScanRow(i);
       if(row != "") { table += row + "\n"; rows++; }
      }
-   if(rows == 0) { g_lastScan = "no symbols with data"; return; }
+   if(g_scanSkipped != "")
+      PrintFormat("AITrader: spread > %.2f ATR, not scanned: %s", g_cfg.maxSpreadAtr, g_scanSkipped);
+   if(rows == 0) { g_lastScan = "no tradeable symbols (spreads too wide or no data)"; return; }
 
    string system = StringFormat(
       "You are a professional multi-asset market scanner. From the table, pick at most %d symbols that offer the "
@@ -669,6 +673,11 @@ string ScanRow(int i)
    double chg = (r[23].close > 0) ? (r[0].close - r[23].close) / r[23].close * 100.0 : 0.0;
    string trend = (e20 > e50 && e50 > e200) ? "UP" : (e20 < e50 && e50 < e200) ? "DOWN" : "MIXED";
    double spread = SymbolInfoDouble(sym, SYMBOL_ASK) - px;
+   if(!HasPosition(sym) && spread / atr > g_cfg.maxSpreadAtr)
+     {
+      g_scanSkipped += StringFormat("%s(%.2f) ", sym, spread / atr);
+      return "";                      // untradeable now: keep it out of the AI's choices
+     }
    int dg = SymDigits(sym);
    return StringFormat("%s,%s,%.2f,%.3f,%.1f,%s,%.0f,%.3f,%s", sym, DoubleToString(px, dg), chg,
                        atr / px * 100.0, rsi, trend, hi > lo ? (px - lo) / (hi - lo) * 100.0 : 50.0,
@@ -742,7 +751,11 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
   {
    string sym = g_syms[idx];
    if(d.action != "BUY" && d.action != "SELL")
-     { LogRow("ENTRY", sym, "HOLD", d.confidence, d.risk_pct, d.sl, d.tp, 0, "HOLD", d.reason); return; }
+     {
+      Notify(StringFormat("%s HOLD (conf %.2f): %s", sym, d.confidence, d.reason));
+      LogRow("ENTRY", sym, "HOLD", d.confidence, d.risk_pct, d.sl, d.tp, 0, "HOLD", d.reason);
+      return;
+     }
 
    string err = "";
    bool isBuy = (d.action == "BUY");
