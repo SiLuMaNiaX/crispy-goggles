@@ -150,6 +150,21 @@ input int              InpSlippagePts     = 30;                      // Max slip
 input int              InpTimerSec        = 0;                       // Timer interval seconds (0 = mode default)
 input string           InpLogFile         = "AITraderEA_log.csv";    // Log file in MQL5\Files
 
+input group "Market context & news (fed to the AI)"
+input bool             InpNewsFilter      = true;                    // 1. Block entries around economic news
+input string           InpNewsCurrencies  = "USD";                   //    News currencies (comma separated)
+input int              InpNewsMinImportance = 3;                     //    Min importance (3 = high, 2 = moderate+)
+input int              InpNewsBeforeMin   = 30;                      //    Block entries N min before an event
+input int              InpNewsAfterMin    = 15;                      //    ...and N min after
+input bool             InpNewsClosePositions = false;                //    Also close open positions in the news window
+input bool             InpKeyLevels       = true;                    // 3. Key levels (prev day/week, Asian range, session opens, round numbers)
+input bool             InpHTFContext      = true;                    // 4. Higher-timeframe trend & structure
+input bool             InpVolumeProfile   = true;                    // 5. Volume profile POC / value area (tick volume)
+input bool             InpTickFlow        = true;                    // 6. Tick-flow proxy (quote up/down ticks)
+input bool             InpSelfReview      = true;                    // 7. Show the AI its own recent trades
+input int              InpSelfReviewTrades= 10;                      //    How many recent trades to show
+input datetime         InpStatsFrom       = 0;                       // 2. Performance stats from (0 = all history)
+
 input group "Dashboard panel"
 input bool             InpShowPanel       = true;                    // Show dashboard panel
 input int              InpPanelX          = 8;                       // Panel X offset (px from left)
@@ -216,8 +231,38 @@ struct RuntimeConfig
    string            sessionText;
   };
 
+struct NewsItem
+  {
+   datetime          t;
+   string            name;
+   string            cur;
+   int               imp;
+  };
+
+struct ClosedTrade
+  {
+   ulong             posId;
+   string            sym;
+   int               dir;
+   datetime          openTime;
+   datetime          closeTime;
+   double            openPrice;
+   double            closePrice;
+   double            volume;
+   double            net;
+   double            sl;
+   double            rMult;
+   string            exitReason;
+  };
+
 //=== Globals =========================================================
 RuntimeConfig g_cfg;
+NewsItem      g_news[];
+datetime      g_newsLoaded = 0;
+bool          g_newsWarned = false;
+ClosedTrade   g_trades[];
+datetime      g_tradesLoaded = 0;
+bool          g_tradesDirty = true;
 
 CTrade   g_trade;
 AIProvider g_prov[];
@@ -238,6 +283,7 @@ int OnInit()
    ArrayResize(g_prov, 0);
    ArrayResize(g_syms, 0);
    g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
+   g_newsLoaded = 0; g_tradesDirty = true; ArrayResize(g_news, 0); ArrayResize(g_trades, 0);
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
    AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
@@ -291,6 +337,8 @@ void OnTimer()
 
    // Algo Trading off (toolbar button, EA checkbox, or this copy was moved to the MQL5 VPS):
    // stay idle so a second copy does not spend API calls.
+   LoadNews();
+   LoadTrades();
    if(!AlgoTradingOn()) { UpdateDashboard(); return; }
 
    // 1. Hard rules first (no AI needed)
@@ -570,6 +618,10 @@ void EnforceHardRules()
    if(IsFridayClose() && CountPositions() > 0)
       CloseAll("Friday close");
 
+   string newsNow;
+   if(InpNewsClosePositions && CountPositions() > 0 && NewsBlocked(newsNow))
+      CloseAll("news window: " + newsNow);
+
    if(InpCloseAtSessionEnd && g_cfg.mode != MODE_SWING && !InSession() && CountPositions() > 0)
       CloseAll(SessionName() + " session ended");
 
@@ -677,6 +729,8 @@ void ScanAndEnter()
 bool EntryAllowed(string &why)
   {
    if(g_haltedToday)                                  { why = "daily loss limit"; return false; }
+   string news;
+   if(NewsBlocked(news))                              { why = "news window: " + news; return false; }
    if(IsFridayClose())                                { why = "Friday close window"; return false; }
    if(!InSession())                                   { why = "outside " + SessionName() + " session"; return false; }
    if(CountPositions() >= g_cfg.maxPositions)            { why = "max positions"; return false; }
@@ -735,9 +789,13 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "risk_percent is %% of equity lost if SL is hit: lower it for high volatility, weak confluence, nearby "
       "major levels, or exposure correlated with open positions. BUY fills at ask, SELL at bid. SL beyond a "
       "logical swing level, %.1f-%.1f ATR from entry. TP at least %.1f x SL distance at a realistic target. "
-      "Prices with %d decimals. HOLD with risk_percent 0 when the edge is unclear.",
+      "Prices with %d decimals. HOLD with risk_percent 0 when the edge is unclear. "
+      "Use all context provided: trade with the HIGHER-TIMEFRAME trend unless a clear reversal is confirmed; anchor "
+      "SL/TP to KEY LEVELS and VOLUME PROFILE value-area edges/POC; treat the TICK-FLOW PROXY as weak confirmation "
+      "only; avoid entries shortly before high-impact news in the ECONOMIC CALENDAR; and review YOUR RECENT TRADES - "
+      "do not repeat setups that recently failed in similar conditions, but do not overreact to a single loss.",
       remaining, g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
-   string user = SymbolContext(idx) + "Open positions:\n" + PositionsSummary() +
+   string user = SymbolContext(idx) + SelfReviewContext() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
    string content, used;
@@ -1042,6 +1100,7 @@ string SymbolContext(int idx)
    s += StringFormat("Account equity %.2f %s, today P/L %.2f%%, open risk %.2f%%, trades today %d/%d\n",
                      eq, AccountInfoString(ACCOUNT_CURRENCY), dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0,
                      OpenRiskPct(), CountTodayEntries(), g_cfg.maxTradesDay);
+   s += HtfContext(sym) + KeyLevelsContext(sym) + VolumeProfileContext(sym) + TickFlowContext(sym) + NewsContext();
    return s;
   }
 
@@ -1713,6 +1772,26 @@ void UpdateDashboard()
                    openRisk, InpMaxTotalRiskPct, CountPositions(), g_cfg.maxPositions,
                    CountTodayEntries(), g_cfg.maxTradesDay),
                    openRisk >= InpMaxTotalRiskPct - 0.01 ? CLR_WARN : CLR_TEXT);
+   if(InpNewsFilter)
+     {
+      string nw;
+      bool blk = NewsBlocked(nw);
+      PanelAddWrapped("NEWS", blk ? "BLOCKED - " + nw : NextNewsText(), blk ? CLR_BAD : CLR_TEXT);
+     }
+   int sn, sw; double snet, spf, sdd, sddp, sR;
+   CalcStats(0, sn, sw, snet, spf, sdd, sddp, sR);
+   string cur = AccountInfoString(ACCOUNT_CURRENCY);
+   if(sn == 0)
+      PanelAddWrapped("RESULTS", "no closed trades yet", CLR_HEAD);
+   else
+     {
+      PanelAddWrapped("RESULTS", StringFormat("%d trades | win %.0f%% | net %+.2f %s | PF %.2f", sn, sw * 100.0 / sn, snet, cur, spf),
+                      snet > 0 ? CLR_GOOD : (snet < 0 ? CLR_BAD : CLR_TEXT));
+      PanelAddWrapped("", StringFormat("max DD %.2f %s (%.1f%%) | avg %+.2fR", sdd, cur, sddp, sR), CLR_TEXT);
+     }
+   bool proven = sn >= 30 && snet > 0 && spf > 1.2;
+   PanelAddWrapped("PROOF", proven ? "criteria met: 30+ trades, net > 0, PF > 1.2"
+                   : StringFormat("%d/30 trades | needs net > 0 and PF > 1.2", sn), proven ? CLR_GOOD : CLR_WARN);
    PanelAdd("", CLR_TEXT);
    PanelAddWrapped("LAST SCAN", g_lastScan, CLR_TEXT);
    PanelAddWrapped("LAST EVENT", g_lastEvent, CLR_HEAD);
@@ -1782,3 +1861,477 @@ void DrawPanel()
   }
 
 //+------------------------------------------------------------------+
+
+//+==================================================================+
+//| MARKET CONTEXT & PERFORMANCE                                     |
+//|  1 news filter   2 performance stats   3 key levels              |
+//|  4 higher TFs    5 volume profile      6 tick-flow proxy         |
+//|  7 self-review (recent trades fed back to the entry model)       |
+//+==================================================================+
+
+//--- small helpers --------------------------------------------------
+string Px(string sym, double v) { return DoubleToString(v, SymDigits(sym)); }
+
+string RelMin(long minutes)
+  {
+   long a = minutes < 0 ? -minutes : minutes;
+   string t = a >= 60 ? StringFormat("%dh%02d", (int)(a / 60), (int)(a % 60)) : StringFormat("%d min", (int)a);
+   return minutes >= 0 ? "in " + t : t + " ago";
+  }
+
+// Server-time equivalent of a GMT time (broker server offset, rounded to 30 min).
+datetime GmtToServer(datetime gmt)
+  {
+   long off = (long)TimeTradeServer() - (long)TimeGMT();
+   off = (long)MathRound(off / 1800.0) * 1800;
+   return (datetime)((long)gmt + off);
+  }
+
+//+------------------------------------------------------------------+
+//| 1. NEWS FILTER - MT5 built-in economic calendar (server time)     |
+//+------------------------------------------------------------------+
+void LoadNews()
+  {
+   if(!InpNewsFilter) return;
+   if(g_newsLoaded != 0 && TimeCurrent() - g_newsLoaded < 600) return; // refresh every 10 min
+   g_newsLoaded = TimeCurrent();
+   ArrayResize(g_news, 0);
+
+   string curs[];
+   int nc = StringSplit(InpNewsCurrencies, ',', curs);
+   datetime from = TimeTradeServer() - 3 * 3600, to = TimeTradeServer() + 36 * 3600;
+   for(int c = 0; c < nc; c++)
+     {
+      string cur = curs[c];
+      StringTrimLeft(cur); StringTrimRight(cur); StringToUpper(cur);
+      if(cur == "") continue;
+      MqlCalendarValue vals[];
+      ResetLastError();
+      int n = CalendarValueHistory(vals, from, to, NULL, cur);
+      if(n <= 0)
+        {
+         if(!g_newsWarned && GetLastError() != 0)
+           { PrintFormat("AITrader: economic calendar unavailable for %s (error %d) - news filter inactive", cur, GetLastError()); g_newsWarned = true; }
+         continue;
+        }
+      for(int i = 0; i < n; i++)
+        {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(vals[i].event_id, ev)) continue;
+         int imp = (int)ev.importance; // 0 none, 1 low, 2 moderate, 3 high
+         if(imp < InpNewsMinImportance) continue;
+         int k = ArraySize(g_news);
+         ArrayResize(g_news, k + 1);
+         g_news[k].t = vals[i].time; g_news[k].name = ev.name; g_news[k].cur = cur; g_news[k].imp = imp;
+        }
+     }
+   // sort by time
+   for(int i = 1; i < ArraySize(g_news); i++)
+      for(int j = i; j > 0 && g_news[j].t < g_news[j - 1].t; j--)
+        { NewsItem tmp = g_news[j]; g_news[j] = g_news[j - 1]; g_news[j - 1] = tmp; }
+  }
+
+// True while inside [event - before, event + after]; 'what' describes the event.
+bool NewsBlocked(string &what)
+  {
+   if(!InpNewsFilter) return false;
+   datetime now = TimeTradeServer();
+   for(int i = 0; i < ArraySize(g_news); i++)
+     {
+      if(now >= g_news[i].t - InpNewsBeforeMin * 60 && now <= g_news[i].t + InpNewsAfterMin * 60)
+        {
+         what = StringFormat("%s %s %s", g_news[i].cur, g_news[i].name, RelMin(((long)g_news[i].t - (long)now) / 60));
+         return true;
+        }
+     }
+   return false;
+  }
+
+string NextNewsText()
+  {
+   datetime now = TimeTradeServer();
+   for(int i = 0; i < ArraySize(g_news); i++)
+      if(g_news[i].t >= now)
+         return StringFormat("next %s %s %s", g_news[i].cur, g_news[i].name, RelMin(((long)g_news[i].t - (long)now) / 60));
+   return "no high-impact news in the next 36h";
+  }
+
+string NewsContext()
+  {
+   if(!InpNewsFilter) return "";
+   datetime now = TimeTradeServer();
+   string s = StringFormat("ECONOMIC CALENDAR (%s, importance >= %s, server time):\n", InpNewsCurrencies,
+                           InpNewsMinImportance >= 3 ? "high" : (InpNewsMinImportance == 2 ? "moderate" : "low"));
+   int shown = 0;
+   for(int i = 0; i < ArraySize(g_news) && shown < 8; i++)
+     {
+      long rel = ((long)g_news[i].t - (long)now) / 60;
+      if(rel < -120 || rel > 12 * 60) continue;
+      s += StringFormat("  %s %s %s (%s)\n", TimeToString(g_news[i].t, TIME_MINUTES), g_news[i].cur, g_news[i].name, RelMin(rel));
+      shown++;
+     }
+   if(shown == 0) s += "  none from 2h ago to 12h ahead\n";
+   string what;
+   if(NewsBlocked(what)) s += "  NEWS WINDOW ACTIVE: new entries are blocked by the EA (" + what + ")\n";
+   return s;
+  }
+
+//+------------------------------------------------------------------+
+//| 2 + 7. CLOSED-TRADE HISTORY (this EA's magic only)                |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+  {
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD) g_tradesDirty = true;
+  }
+
+string DealReasonText(long r)
+  {
+   if(r == DEAL_REASON_SL)     return "SL";
+   if(r == DEAL_REASON_TP)     return "TP";
+   if(r == DEAL_REASON_EXPERT) return "EA/AI";
+   if(r == DEAL_REASON_SO)     return "stop-out";
+   return "manual";
+  }
+
+void LoadTrades()
+  {
+   if(!g_tradesDirty && g_tradesLoaded != 0 && TimeCurrent() - g_tradesLoaded < 300) return;
+   g_tradesDirty = false;
+   g_tradesLoaded = TimeCurrent();
+   ArrayResize(g_trades, 0);
+   if(!HistorySelect(InpStatsFrom, TimeCurrent() + 3600)) return;
+   int total = HistoryDealsTotal();
+
+   // pass 1: positions opened by this EA
+   ulong ids[];
+   for(int i = 0; i < total; i++)
+     {
+      ulong t = HistoryDealGetTicket(i);
+      if(t == 0 || (ulong)HistoryDealGetInteger(t, DEAL_MAGIC) != InpMagic) continue;
+      if(HistoryDealGetInteger(t, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+      ulong id = (ulong)HistoryDealGetInteger(t, DEAL_POSITION_ID);
+      bool seen = false;
+      for(int k = 0; k < ArraySize(ids); k++) if(ids[k] == id) { seen = true; break; }
+      if(!seen) { int k = ArraySize(ids); ArrayResize(ids, k + 1); ids[k] = id; }
+     }
+
+   // pass 2: aggregate every deal of those positions (entry, partials, SL/TP closes)
+   for(int k = 0; k < ArraySize(ids); k++)
+     {
+      ClosedTrade c;
+      c.posId = ids[k]; c.sym = ""; c.dir = 0; c.openTime = 0; c.closeTime = 0;
+      c.openPrice = 0; c.closePrice = 0; c.volume = 0; c.net = 0; c.sl = 0; c.rMult = 0; c.exitReason = "";
+      double inVol = 0, outVol = 0, outValue = 0;
+      ulong entryOrder = 0;
+      for(int i = 0; i < total; i++)
+        {
+         ulong t = HistoryDealGetTicket(i);
+         if(t == 0 || (ulong)HistoryDealGetInteger(t, DEAL_POSITION_ID) != ids[k]) continue;
+         double v = HistoryDealGetDouble(t, DEAL_VOLUME), p = HistoryDealGetDouble(t, DEAL_PRICE);
+         c.net += HistoryDealGetDouble(t, DEAL_PROFIT) + HistoryDealGetDouble(t, DEAL_COMMISSION) +
+                  HistoryDealGetDouble(t, DEAL_SWAP) + HistoryDealGetDouble(t, DEAL_FEE);
+         long entry = HistoryDealGetInteger(t, DEAL_ENTRY);
+         if(entry == DEAL_ENTRY_IN)
+           {
+            if(inVol == 0)
+              {
+               c.openTime   = (datetime)HistoryDealGetInteger(t, DEAL_TIME);
+               c.openPrice  = p;
+               c.sym        = HistoryDealGetString(t, DEAL_SYMBOL);
+               c.dir        = HistoryDealGetInteger(t, DEAL_TYPE) == DEAL_TYPE_BUY ? 1 : -1;
+               entryOrder   = (ulong)HistoryDealGetInteger(t, DEAL_ORDER);
+              }
+            inVol += v;
+           }
+         else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+           {
+            outVol += v; outValue += v * p;
+            c.closeTime  = (datetime)HistoryDealGetInteger(t, DEAL_TIME);
+            c.exitReason = DealReasonText(HistoryDealGetInteger(t, DEAL_REASON));
+           }
+        }
+      if(inVol <= 0 || outVol < inVol - 1e-8) continue; // still open
+      c.volume = inVol;
+      c.closePrice = outValue / outVol;
+      if(entryOrder != 0) c.sl = HistoryOrderGetDouble(entryOrder, ORDER_SL);
+      double pnl = 0;
+      if(c.sl > 0 && OrderCalcProfit(c.dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, c.sym, inVol, c.openPrice, c.sl, pnl) && pnl < 0)
+         c.rMult = c.net / -pnl;
+      int n = ArraySize(g_trades);
+      ArrayResize(g_trades, n + 1);
+      g_trades[n] = c;
+     }
+   // sort by close time
+   for(int i = 1; i < ArraySize(g_trades); i++)
+      for(int j = i; j > 0 && g_trades[j].closeTime < g_trades[j - 1].closeTime; j--)
+        { ClosedTrade tmp = g_trades[j]; g_trades[j] = g_trades[j - 1]; g_trades[j - 1] = tmp; }
+  }
+
+// Stats over the most recent 'lastN' trades (0 = all).
+void CalcStats(int lastN, int &n, int &wins, double &net, double &pf, double &maxDD, double &maxDDPct, double &avgR)
+  {
+   int total = ArraySize(g_trades);
+   int start = (lastN > 0 && total > lastN) ? total - lastN : 0;
+   n = 0; wins = 0; net = 0; pf = 0; maxDD = 0; maxDDPct = 0; avgR = 0;
+   double gp = 0, gl = 0, cum = 0, peak = 0, sumR = 0;
+   int nR = 0;
+   double startBal = AccountInfoDouble(ACCOUNT_BALANCE);
+   for(int i = start; i < total; i++) startBal -= g_trades[i].net; // approx (ignores deposits)
+   for(int i = start; i < total; i++)
+     {
+      double x = g_trades[i].net;
+      n++; net += x; cum += x;
+      if(x > 0) { wins++; gp += x; } else gl -= x;
+      if(cum > peak) peak = cum;
+      if(peak - cum > maxDD) { maxDD = peak - cum; maxDDPct = (startBal + peak) > 0 ? maxDD / (startBal + peak) * 100 : 0; }
+      if(g_trades[i].rMult != 0) { sumR += g_trades[i].rMult; nR++; }
+     }
+   pf = gl > 0 ? gp / gl : (gp > 0 ? 99.0 : 0.0);
+   avgR = nR > 0 ? sumR / nR : 0;
+  }
+
+string SelfReviewContext()
+  {
+   if(!InpSelfReview) return "";
+   LoadTrades();
+   int total = ArraySize(g_trades);
+   if(total == 0) return "YOUR RECENT TRADES: none closed yet.\n";
+   int n, wins; double net, pf, dd, ddp, avgR;
+   CalcStats(20, n, wins, net, pf, dd, ddp, avgR);
+   string cur = AccountInfoString(ACCOUNT_CURRENCY);
+   string s = StringFormat("YOUR RECENT TRADES (this EA; last %d: %d wins, net %.2f %s, profit factor %.2f, avg %.2fR). Newest first:\n",
+                           n, wins, net, cur, pf, avgR);
+   int shown = 0;
+   for(int i = total - 1; i >= 0 && shown < InpSelfReviewTrades; i--, shown++)
+     {
+      ClosedTrade c = g_trades[i];
+      s += StringFormat("  %s %s %s in %s out %s via %s | %+.2f %s (%+.2fR) | held %d min\n",
+                        TimeToString(c.openTime, TIME_DATE | TIME_MINUTES), c.dir > 0 ? "BUY" : "SELL", c.sym,
+                        Px(c.sym, c.openPrice), Px(c.sym, c.closePrice), c.exitReason, c.net, cur, c.rMult,
+                        (int)(((long)c.closeTime - (long)c.openTime) / 60));
+     }
+   return s;
+  }
+
+//+------------------------------------------------------------------+
+//| 3. KEY LEVELS                                                     |
+//+------------------------------------------------------------------+
+string KeyLevelsContext(string sym)
+  {
+   if(!InpKeyLevels) return "";
+   string s = "KEY LEVELS:\n";
+   MqlRates d[]; ArraySetAsSeries(d, true);
+   if(CopyRates(sym, PERIOD_D1, 0, 2, d) == 2)
+      s += StringFormat("  previous day H %s L %s C %s | today O %s H %s L %s\n", Px(sym, d[1].high), Px(sym, d[1].low),
+                        Px(sym, d[1].close), Px(sym, d[0].open), Px(sym, d[0].high), Px(sym, d[0].low));
+   MqlRates w[]; ArraySetAsSeries(w, true);
+   if(CopyRates(sym, PERIOD_W1, 0, 2, w) == 2)
+      s += StringFormat("  week open %s | previous week H %s L %s\n", Px(sym, w[0].open), Px(sym, w[1].high), Px(sym, w[1].low));
+
+   datetime gmt = TimeGMT(), nowSrv = TimeTradeServer();
+   datetime gmtMidnight = (datetime)((long)gmt - (long)gmt % 86400);
+   // Asian range: Tokyo 09-17 = 00-08 GMT
+   datetime aFrom = GmtToServer(gmtMidnight), aTo = GmtToServer(gmtMidnight + 8 * 3600);
+   if(nowSrv > aFrom)
+     {
+      MqlRates a[];
+      int n = CopyRates(sym, PERIOD_M5, aFrom, nowSrv < aTo ? nowSrv : aTo, a);
+      if(n > 0)
+        {
+         double hi = a[0].high, lo = a[0].low;
+         for(int i = 1; i < n; i++) { hi = MathMax(hi, a[i].high); lo = MathMin(lo, a[i].low); }
+         s += StringFormat("  Asian range today H %s L %s%s\n", Px(sym, hi), Px(sym, lo), nowSrv < aTo ? " (still forming)" : "");
+        }
+     }
+   // session opens (08:00 local London / New York, DST-aware)
+   datetime lon = GmtToServer(gmtMidnight + (8 * 60 - LondonOffsetMin(gmt)) * 60);
+   datetime ny  = GmtToServer(gmtMidnight + (8 * 60 - NewYorkOffsetMin(gmt)) * 60);
+   if(nowSrv > lon) s += "  London open price " + Px(sym, iOpen(sym, PERIOD_M5, iBarShift(sym, PERIOD_M5, lon))) + "\n";
+   if(nowSrv > ny)  s += "  New York open price " + Px(sym, iOpen(sym, PERIOD_M5, iBarShift(sym, PERIOD_M5, ny))) + "\n";
+
+   // round numbers
+   double px = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(px > 0)
+     {
+      double minor = MathPow(10, MathFloor(MathLog10(px)) - 2), major = minor * 5;
+      double below = MathFloor(px / major) * major, above = below + major;
+      s += StringFormat("  round numbers: %s / %s (major), nearest %s step: %s / %s\n", Px(sym, below), Px(sym, above),
+                        Px(sym, minor), Px(sym, MathFloor(px / minor) * minor), Px(sym, MathFloor(px / minor) * minor + minor));
+     }
+   return s;
+  }
+
+//+------------------------------------------------------------------+
+//| 4. HIGHER-TIMEFRAME CONTEXT                                       |
+//+------------------------------------------------------------------+
+void HigherTFs(ENUM_TIMEFRAMES base, ENUM_TIMEFRAMES &a, ENUM_TIMEFRAMES &b)
+  {
+   if(base == PERIOD_M1)       { a = PERIOD_M5;  b = PERIOD_M15; }
+   else if(base == PERIOD_M5)  { a = PERIOD_M15; b = PERIOD_H1; }
+   else if(base <= PERIOD_M30) { a = PERIOD_H1;  b = PERIOD_H4; }
+   else if(base <= PERIOD_H1)  { a = PERIOD_H4;  b = PERIOD_D1; }
+   else                        { a = PERIOD_D1;  b = PERIOD_W1; }
+  }
+
+double EmaOf(const double &c[], int period)
+  {
+   int n = ArraySize(c);
+   if(n < period) return 0;
+   double e = 0;
+   for(int i = 0; i < period; i++) e += c[i];
+   e /= period;
+   double k = 2.0 / (period + 1);
+   for(int i = period; i < n; i++) e = c[i] * k + e * (1 - k);
+   return e;
+  }
+
+double RsiOf(const double &c[], int period)
+  {
+   int n = ArraySize(c);
+   if(n <= period) return 50;
+   double g = 0, l = 0;
+   for(int i = 1; i <= period; i++) { double d = c[i] - c[i - 1]; if(d > 0) g += d; else l -= d; }
+   g /= period; l /= period;
+   for(int i = period + 1; i < n; i++)
+     {
+      double d = c[i] - c[i - 1];
+      g = (g * (period - 1) + (d > 0 ? d : 0)) / period;
+      l = (l * (period - 1) + (d < 0 ? -d : 0)) / period;
+     }
+   return l == 0 ? 100 : 100 - 100 / (1 + g / l);
+  }
+
+string OneTfSummary(string sym, ENUM_TIMEFRAMES tf)
+  {
+   double c[];
+   ArraySetAsSeries(c, false);
+   int n = CopyClose(sym, tf, 1, 150, c); // oldest first, closed bars
+   if(n < 60) return "";
+   double e20 = EmaOf(c, 20), e50 = EmaOf(c, 50), rsi = RsiOf(c, 14), last = c[n - 1];
+   string trend = (last > e20 && e20 > e50) ? "UP" : (last < e20 && e20 < e50) ? "DOWN" : "MIXED";
+   MqlRates r[]; ArraySetAsSeries(r, true);
+   int m = CopyRates(sym, tf, 1, 20, r);
+   double hi = 0, lo = 0;
+   if(m > 0) { hi = r[0].high; lo = r[0].low; for(int i = 1; i < m; i++) { hi = MathMax(hi, r[i].high); lo = MathMin(lo, r[i].low); } }
+   string s = StringFormat("  %s: trend %s | close %s EMA20 %s EMA50 %s RSI14 %.1f | 20-bar high %s low %s\n    last 6 bars (o,h,l,c):",
+                           TfName(tf), trend, Px(sym, last), Px(sym, e20), Px(sym, e50), rsi, Px(sym, hi), Px(sym, lo));
+   for(int i = (int)MathMin(5, m - 1); i >= 0; i--)
+      s += StringFormat(" [%s,%s,%s,%s]", Px(sym, r[i].open), Px(sym, r[i].high), Px(sym, r[i].low), Px(sym, r[i].close));
+   return s + "\n";
+  }
+
+string HtfContext(string sym)
+  {
+   if(!InpHTFContext) return "";
+   ENUM_TIMEFRAMES a, b;
+   HigherTFs(g_cfg.scanTF, a, b);
+   return "HIGHER TIMEFRAMES:\n" + OneTfSummary(sym, a) + OneTfSummary(sym, b);
+  }
+
+//+------------------------------------------------------------------+
+//| 5. VOLUME PROFILE (from M1 tick volume)                           |
+//+------------------------------------------------------------------+
+bool VolumeProfile(string sym, datetime from, datetime to, double &poc, double &vah, double &val)
+  {
+   MqlRates r[];
+   int n = CopyRates(sym, PERIOD_M1, from, to, r);
+   if(n < 30) return false;
+   double lo = r[0].low, hi = r[0].high;
+   for(int i = 1; i < n; i++) { lo = MathMin(lo, r[i].low); hi = MathMax(hi, r[i].high); }
+   double bin = MathMax(SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE), r[n - 1].close * 0.0002);
+   if(bin <= 0) return false;
+   int nb = (int)((hi - lo) / bin) + 1;
+   while(nb > 1500) { bin *= 2; nb = (int)((hi - lo) / bin) + 1; }
+   double v[];
+   ArrayResize(v, nb);
+   ArrayInitialize(v, 0);
+   double total = 0;
+   for(int i = 0; i < n; i++)
+     {
+      int a = (int)((r[i].low - lo) / bin), b = (int)((r[i].high - lo) / bin);
+      a = (int)MathMax(0, MathMin(nb - 1, a)); b = (int)MathMax(a, MathMin(nb - 1, b));
+      double per = (double)r[i].tick_volume / (b - a + 1);
+      for(int k = a; k <= b; k++) v[k] += per;
+      total += (double)r[i].tick_volume;
+     }
+   if(total <= 0) return false;
+   int p = 0;
+   for(int k = 1; k < nb; k++) if(v[k] > v[p]) p = k;
+   int lo_i = p, hi_i = p;
+   double acc = v[p];
+   while(acc < 0.7 * total)
+     {
+      double up = hi_i + 1 < nb ? v[hi_i + 1] : -1, dn = lo_i - 1 >= 0 ? v[lo_i - 1] : -1;
+      if(up < 0 && dn < 0) break;
+      if(up >= dn) { hi_i++; acc += up; } else { lo_i--; acc += dn; }
+     }
+   poc = lo + (p + 0.5) * bin;
+   vah = lo + (hi_i + 1) * bin;
+   val = lo + lo_i * bin;
+   return true;
+  }
+
+string VolumeProfileContext(string sym)
+  {
+   if(!InpVolumeProfile) return "";
+   MqlRates d[]; ArraySetAsSeries(d, true);
+   if(CopyRates(sym, PERIOD_D1, 0, 2, d) != 2) return "";
+   string s = "VOLUME PROFILE (from broker tick volume, 70% value area):\n";
+   double poc, vah, val;
+   if(VolumeProfile(sym, d[1].time, d[0].time - 1, poc, vah, val))
+      s += StringFormat("  previous day: POC %s, value area %s - %s\n", Px(sym, poc), Px(sym, val), Px(sym, vah));
+   if(VolumeProfile(sym, d[0].time, TimeTradeServer(), poc, vah, val))
+      s += StringFormat("  today so far: POC %s, value area %s - %s\n", Px(sym, poc), Px(sym, val), Px(sym, vah));
+   return s;
+  }
+
+//+------------------------------------------------------------------+
+//| 6. TICK-FLOW PROXY (quote up-ticks vs down-ticks)                 |
+//+------------------------------------------------------------------+
+string TickFlowContext(string sym)
+  {
+   if(!InpTickFlow) return "";
+   MqlTick last;
+   if(!SymbolInfoTick(sym, last)) return "";
+   ulong to = (ulong)last.time_msc, from = to - 3600000;
+   MqlTick t[];
+   int n = CopyTicksRange(sym, t, COPY_TICKS_INFO, from, to);
+   if(n < 50) return "";
+
+   int    wins[] = {5, 15, 60};
+   string s = "TICK-FLOW PROXY (counts of quote up-ticks vs down-ticks; NOT real exchange volume - weight lightly):\n";
+   for(int w = 0; w < 3; w++)
+     {
+      ulong start = to - (ulong)wins[w] * 60000;
+      int up = 0, dn = 0;
+      double firstMid = 0, lastMid = 0, prev = 0;
+      for(int i = 0; i < n; i++)
+        {
+         if(t[i].time_msc < start) { prev = (t[i].bid + t[i].ask) / 2; continue; }
+         double mid = (t[i].bid + t[i].ask) / 2;
+         if(firstMid == 0) firstMid = mid;
+         if(prev > 0) { if(mid > prev) up++; else if(mid < prev) dn++; }
+         prev = mid; lastMid = mid;
+        }
+      int tot = up + dn;
+      double chg = lastMid - firstMid;
+      s += StringFormat("  last %d min: up %d / down %d (delta %+d, %+.0f%%), price change %s%s\n", wins[w], up, dn, up - dn,
+                        tot > 0 ? (up - dn) * 100.0 / tot : 0.0, chg >= 0 ? "+" : "", DoubleToString(chg, SymDigits(sym)));
+     }
+   // cumulative delta path in 10-minute steps over the last hour
+   string path = "  60-min cumulative delta, 10-min steps:";
+   int cum = 0, j = 0;
+   double prevMid = 0;
+   for(int step = 1; step <= 6; step++)
+     {
+      ulong edge = from + (ulong)step * 600000;
+      for(; j < n && t[j].time_msc <= edge; j++)
+        {
+         double mid = (t[j].bid + t[j].ask) / 2;
+         if(prevMid > 0) { if(mid > prevMid) cum++; else if(mid < prevMid) cum--; }
+         prevMid = mid;
+        }
+      path += StringFormat(" %+d", cum);
+     }
+   return s + path + "\n";
+  }
