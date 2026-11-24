@@ -1686,7 +1686,10 @@ void UpdateDashboard()
 
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
    double dayPct = dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0;
-   string status = !AlgoTradingOn() ? "PAUSED - Algo Trading off here (or EA moved to VPS)" :
+   string pausedWhy = !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
+                      ? "PAUSED - toolbar Algo Trading is off (or EA moved to VPS)"
+                      : "PAUSED - tick Allow Algo Trading in the EA's Common tab";
+   string status = !AlgoTradingOn() ? pausedWhy :
                    g_haltedToday ? "HALTED - daily loss limit" : (InpDryRun ? "DRY RUN - no orders sent" : "LIVE TRADING");
    color  stClr  = !AlgoTradingOn() ? CLR_HEAD : g_haltedToday ? CLR_BAD : (InpDryRun ? CLR_WARN : CLR_BAD);
 
