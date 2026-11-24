@@ -137,6 +137,10 @@ The chart dashboard shows the active mode, session (open or closed), profile and
 
 The portfolio limits are max positions, max trades per day, max total open risk (3% by default), entry hours and the daily AI call budget.
 
+## Direct mode (gold-only)
+
+The default watchlist is `XAUUSD`. When **2 or fewer** symbols pass the spread filter (*Skip the AI scanner when this many or fewer symbols are tradeable*), the EA skips the scan stage. On every scan bar, the entry model (asAi) judges each tradeable symbol in either direction, and the second-opinion model (Gemini) must agree before any trade. Set that input to 0 to always use the scanner.
+
 ## API keys: where to put them
 
 | Where | Works on | Shown in logs? |

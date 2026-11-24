@@ -112,7 +112,8 @@ input int              InpTimeoutMs       = 45000;                   // HTTP tim
 input int              InpMaxAICallsDay   = 0;                       // Max AI calls per day (0 = mode default)
 
 input group "Scanner"
-input string           InpSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,XAGUSD"; // Watchlist (broker names, comma separated)
+input string           InpSymbols         = "XAUUSD";                // Watchlist (comma separated; broker suffix added automatically)
+input int              InpDirectMaxSymbols= 2;                       // Skip the AI scanner when this many or fewer symbols are tradeable (0 = always scan)
 input ENUM_TIMEFRAMES  InpTimeframe       = PERIOD_H1;               // [Custom] Scan/entry timeframe
 input int              InpMaxCandidates   = 2;                       // [Balanced] Max candidates per scan
 input double           InpMinScanScore    = 0.6;                     // [Balanced] Min scan score
@@ -612,6 +613,21 @@ void ScanAndEnter()
       PrintFormat("AITrader: spread > %.2f ATR, not scanned: %s", g_cfg.maxSpreadAtr, g_scanSkipped);
    if(rows == 0) { g_lastScan = "no tradeable symbols (spreads too wide or no data)"; return; }
 
+   // Few tradeable symbols (e.g. gold only): ranking them is pointless, so ask the entry model directly.
+   if(rows <= InpDirectMaxSymbols)
+     {
+      g_lastScan = "direct mode: ";
+      for(int i = 0; i < ArraySize(g_syms); i++)
+        {
+         if(StringFind(table, g_syms[i] + ",") < 0 || HasPosition(g_syms[i])) continue;
+         if(!EntryAllowed(why)) { Print("AITrader: stop entries - ", why); break; }
+         g_lastScan += g_syms[i] + " ";
+         PrintFormat("AITrader: direct entry check %s (scanner skipped, %d tradeable symbol%s)", g_syms[i], rows, rows > 1 ? "s" : "");
+         EvaluateEntry(i, "ANY", 0, "");
+        }
+      return;
+     }
+
    string system = StringFormat(
       "You are a professional multi-asset market scanner. From the table, pick at most %d symbols that offer the "
       "clearest, highest-quality trade setup on the %s timeframe RIGHT NOW (trend continuation after pullback, "
@@ -707,16 +723,20 @@ void EvaluateEntry(int idx, string bias, double score, string note)
      { Print("AITrader: ", sym, " spread too wide vs ATR"); return; }
 
    double remaining = MathMin(g_cfg.riskPct, InpMaxTotalRiskPct - OpenRiskPct());
-   string system = StringFormat(
-      "You are a disciplined trader and risk manager. The scanner flagged %s with a %s bias (score %.2f: %s). "
-      "Confirm or reject using the data. Decide whether to open ONE position now and how much to risk. "
+   string intro = (bias == "ANY")
+      ? StringFormat("You are a disciplined trader and risk manager watching %s. Judge the data yourself and consider "
+                     "BUY and SELL equally. ", sym)
+      : StringFormat("You are a disciplined trader and risk manager. The scanner flagged %s with a %s bias "
+                     "(score %.2f: %s). Confirm or reject using the data. ", sym, bias, score, note);
+   string system = intro + StringFormat(
+      "Decide whether to open ONE position now and how much to risk. "
       "Reply ONLY with JSON: {\"action\":\"BUY\"|\"SELL\"|\"HOLD\",\"confidence\":0.0-1.0,"
       "\"risk_percent\":0.0-%.2f,\"sl\":price,\"tp\":price,\"reason\":\"max 30 words\"}. "
       "risk_percent is %% of equity lost if SL is hit: lower it for high volatility, weak confluence, nearby "
       "major levels, or exposure correlated with open positions. BUY fills at ask, SELL at bid. SL beyond a "
       "logical swing level, %.1f-%.1f ATR from entry. TP at least %.1f x SL distance at a realistic target. "
       "Prices with %d decimals. HOLD with risk_percent 0 when the edge is unclear.",
-      sym, bias, score, note, remaining, g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
+      remaining, g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
    string user = SymbolContext(idx) + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
