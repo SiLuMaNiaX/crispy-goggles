@@ -145,7 +145,7 @@ The portfolio limits are max positions, max trades per day, max total open risk 
    - ✅ **Allow WebRequest for listed URL**: **add `https://serveras.click`**. This is the asAi API host, which is different from the `serverasai.com` dashboard site. Keep `https://api.deepseek.com` and `https://openrouter.ai`, which you already have.
 3. Create the three key files in `<Common>\Files` (usually `%APPDATA%\MetaQuotes\Terminal\Common\Files`). Put each key alone on one line, using the file names in the table above. You can paste keys into the inputs instead, but they are then saved in plain text with the chart settings.
 4. In asAi → **Models**, copy the exact model ID you want and paste it into *Provider 1 → Model id*. The default `deepseek-chat` is only a placeholder.
-5. Set **Watchlist** to your broker's exact symbol names, for example `XAUUSDm,EURUSDm` if your broker adds a suffix.
+5. Set **Watchlist** to plain names such as `XAUUSD,EURUSD`. The EA adds your broker's suffix or prefix automatically (`XAUUSD` → `XAUUSDc`, `XAUUSD.m`, …). The Experts log shows each mapping as `XAUUSD -> broker symbol XAUUSDc`. You can also type the exact broker names.
 6. Attach the EA to **one** chart. Any symbol works; that chart's symbol only provides the bar timing. Tick *Allow Algo Trading* in the EA's Common tab.
 7. Run with **Dry run = true** on a demo account for at least 1–2 weeks. Then review `MQL5\Files\AITraderEA_log.csv`, which records every scan, entry, hold, rejection, management action and close.
 

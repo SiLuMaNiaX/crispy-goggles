@@ -1364,6 +1364,30 @@ double JsonGetNumber(const string obj, const string key)
 //+------------------------------------------------------------------+
 //| Symbols, positions, history                                       |
 //+------------------------------------------------------------------+
+// Maps a plain name (XAUUSD) to the broker's name (XAUUSDc, XAUUSD.m, mXAUUSD, ...).
+// 1) exact name  2) base + the chart symbol's suffix  3) any broker symbol containing the base.
+string ResolveSymbol(string base)
+  {
+   bool custom = false;
+   if(SymbolExist(base, custom) && SymbolSelect(base, true)) return base;
+
+   string suffix = StringLen(_Symbol) > 6 ? StringSubstr(_Symbol, 6) : "";
+   if(suffix != "" && SymbolExist(base + suffix, custom) && SymbolSelect(base + suffix, true)) return base + suffix;
+
+   string best = "";
+   int total = SymbolsTotal(false);
+   for(int i = 0; i < total; i++)
+     {
+      string name = SymbolName(i, false);
+      if(StringFind(name, base) < 0 || StringLen(name) > StringLen(base) + 4) continue;
+      long mode = SymbolInfoInteger(name, SYMBOL_TRADE_MODE);
+      if(mode == SYMBOL_TRADE_MODE_DISABLED) continue;
+      if(best == "" || StringLen(name) < StringLen(best)) best = name; // prefer the shortest variant
+     }
+   if(best != "" && SymbolSelect(best, true)) return best;
+   return "";
+  }
+
 bool LoadSymbols()
   {
    string parts[];
@@ -1374,7 +1398,11 @@ bool LoadSymbols()
       string s = parts[i];
       StringTrimLeft(s); StringTrimRight(s);
       if(s == "") continue;
-      if(!SymbolSelect(s, true)) { Print("AITrader: symbol not found at broker, skipped: ", s); continue; }
+      string resolved = ResolveSymbol(s);
+      if(resolved == "") { Print("AITrader: symbol not found at broker, skipped: ", s); continue; }
+      if(resolved != s) PrintFormat("AITrader: %s -> broker symbol %s", s, resolved);
+      if(SymbolIndex(resolved) >= 0 && g_syms[SymbolIndex(resolved)] == resolved) continue; // duplicate
+      s = resolved;
       int k = ArraySize(g_syms);
       ArrayResize(g_syms, k + 1);   ArrayResize(g_hATR, k + 1); ArrayResize(g_hRSI, k + 1);
       ArrayResize(g_hE20, k + 1);   ArrayResize(g_hE50, k + 1); ArrayResize(g_hE200, k + 1);
