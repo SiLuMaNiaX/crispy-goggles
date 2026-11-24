@@ -141,6 +141,25 @@ The portfolio limits are max positions, max trades per day, max total open risk 
 
 The default watchlist is `XAUUSD`. When **2 or fewer** symbols pass the spread filter (*Skip the AI scanner when this many or fewer symbols are tradeable*), the EA skips the scan stage. On every scan bar, the entry model (asAi) judges each tradeable symbol in either direction, and the second-opinion model (Gemini) must agree before any trade. Set that input to 0 to always use the scanner.
 
+## Pending orders (LIMIT / STOP)
+
+The entry model can choose how to enter:
+
+| Order | When the AI uses it |
+|---|---|
+| **MARKET** | The setup is valid right now. |
+| **LIMIT** | "Wait for a pullback, retest or rejection at X": BUY LIMIT below price, SELL LIMIT above price. |
+| **STOP** | "Trade the confirmed break of X": BUY STOP above price, SELL STOP below price. |
+
+What the EA enforces:
+- the entry must be within *Max distance* (1.5 × ATR by default) and on the correct side of price;
+- SL, TP and reward:risk are measured from the entry price, and the position is sized so a stop-loss hit loses exactly the approved risk;
+- only one pending order per symbol at a time; pending orders count toward max positions, open risk and trades per day;
+- an expiry set per mode (superscalp 15 min, scalp 45, intraday 240, swing 1440), applied at the broker where supported and always by the EA as well;
+- pending orders are cancelled automatically in the news window, at session end, on the daily loss limit and at the Friday close.
+
+Switch *AI may use LIMIT / STOP orders* off for market-only behaviour.
+
 ## Market context, news filter and performance tracking
 
 | # | Feature | What the AI or EA gets | Input |

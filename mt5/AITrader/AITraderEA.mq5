@@ -174,6 +174,11 @@ input int              InpSlippagePts     = 30;                      // Max slip
 input int              InpTimerSec        = 0;                       // Timer interval seconds (0 = mode default)
 input string           InpLogFile         = "AITraderEA_log.csv";    // Log file in MQL5\Files
 
+input group "Pending orders"
+input bool             InpAllowPending    = true;                    // AI may use LIMIT / STOP orders (e.g. "sell the retest at X")
+input double           InpPendingMaxAtr   = 1.5;                     // Max distance of a pending entry from price (x ATR)
+input int              InpPendingExpiryMin= 0;                       // Max pending lifetime in minutes (0 = mode default)
+
 input group "Market context & news (fed to the AI)"
 input bool             InpNewsFilter      = true;                    // 1. Block entries around economic news
 input string           InpNewsCurrencies  = "USD";                   //    News currencies (comma separated)
@@ -209,6 +214,9 @@ input int              InpPanelWrapChars  = 63;                      // Wrap lon
 struct EntryDecision
   {
    string            action;     // BUY / SELL / HOLD
+   string            order;      // MARKET / LIMIT / STOP
+   double            entry;      // pending entry price
+   int               expiryMin;  // pending lifetime
    double            confidence;
    double            risk_pct;
    double            sl;
@@ -256,6 +264,7 @@ struct RuntimeConfig
    double            minConf;
    double            minManageConf;
    double            minScanScore;
+   int               pendingExpiryMin;
    bool              consensus;
    bool              consensusStrict;
    bool              fridayClose;
@@ -444,6 +453,8 @@ bool BuildConfig()
          break;
      }
    g_cfg.fridayClose = !(InpTradeMode == MODE_SWING && InpSwingHoldWeekend);
+   int expDefault[] = {15, 45, 240, 1440, 120};          // superscalp, scalp, intraday, swing, custom
+   g_cfg.pendingExpiryMin = InpPendingExpiryMin > 0 ? InpPendingExpiryMin : expDefault[(int)InpTradeMode];
    if(InpTimerSec > 0)      g_cfg.timerSec = (int)MathMax(2, InpTimerSec);
    if(InpMaxAICallsDay > 0) g_cfg.maxCalls = InpMaxAICallsDay;
 
@@ -653,6 +664,13 @@ void EnforceHardRules()
       if(InpCloseOnDailyLoss) CloseAll("daily loss limit");
      }
 
+   ExpirePendings();
+   if((g_haltedToday || IsFridayClose()) && CountPendings() > 0) CancelPendings(g_haltedToday ? "daily loss limit" : "Friday close");
+   string newsP;
+   if(CountPendings() > 0 && NewsBlocked(newsP)) CancelPendings("news window: " + newsP);
+   if(InpCloseAtSessionEnd && g_cfg.mode != MODE_SWING && !InSession() && CountPendings() > 0)
+      CancelPendings(SessionName() + " session ended");
+
    if(IsFridayClose() && CountPositions() > 0)
       CloseAll("Friday close");
 
@@ -709,7 +727,7 @@ void ScanAndEnter()
       g_lastScan = "direct mode: ";
       for(int i = 0; i < ArraySize(g_syms); i++)
         {
-         if(StringFind(table, g_syms[i] + ",") < 0 || HasPosition(g_syms[i])) continue;
+         if(StringFind(table, g_syms[i] + ",") < 0 || HasPosition(g_syms[i]) || HasPending(g_syms[i])) continue;
          if(!EntryAllowed(why)) { Print("AITrader: stop entries - ", why); break; }
          g_lastScan += g_syms[i] + " ";
          PrintFormat("AITrader: direct entry check %s (scanner skipped, %d tradeable symbol%s)", g_syms[i], rows, rows > 1 ? "s" : "");
@@ -754,7 +772,7 @@ void ScanAndEnter()
       if(idx < 0)                  { Print("AITrader: scan picked unknown symbol ", sym); continue; }
       if(score < g_cfg.minScanScore)
         { PrintFormat("AITrader: scan pick %s %s score %.2f < %.2f - skipped (%s)", sym, bias, score, g_cfg.minScanScore, note); continue; }
-      if(HasPosition(sym))         continue;
+      if(HasPosition(sym) || HasPending(sym)) continue;
       if(!EntryAllowed(why))       { Print("AITrader: stop entries - ", why); break; }
       analysed++;
       PrintFormat("AITrader: scan pick %s %s score %.2f -> asking for entry (%s)", sym, bias, score, note);
@@ -771,7 +789,7 @@ bool EntryAllowed(string &why)
    if(NewsBlocked(news))                              { why = "news window: " + news; return false; }
    if(IsFridayClose())                                { why = "Friday close window"; return false; }
    if(!InSession())                                   { why = "outside " + SessionName() + " session"; return false; }
-   if(CountPositions() >= g_cfg.maxPositions)            { why = "max positions"; return false; }
+   if(CountPositions() + CountPendings() >= g_cfg.maxPositions) { why = "max positions (incl. pending orders)"; return false; }
    if(CountTodayEntries() >= g_cfg.maxTradesDay)         { why = "max trades today"; return false; }
    if(OpenRiskPct() >= InpMaxTotalRiskPct - 0.01)     { why = "total open risk cap"; return false; }
    if(g_calls >= g_cfg.maxCalls)                    { why = "AI call budget"; return false; }
@@ -821,19 +839,22 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       : StringFormat("You are a disciplined trader and risk manager. The scanner flagged %s with a %s bias "
                      "(score %.2f: %s). Confirm or reject using the data. ", sym, bias, score, note);
    string system = intro + StringFormat(
-      "Decide whether to open ONE position now and how much to risk. "
-      "Reply ONLY with JSON: {\"action\":\"BUY\"|\"SELL\"|\"HOLD\",\"confidence\":0.0-1.0,"
+      "Decide whether to place ONE trade and how much to risk. "
+      "Reply ONLY with JSON: {\"action\":\"BUY\"|\"SELL\"|\"HOLD\",\"order\":\"MARKET\"|\"LIMIT\"|\"STOP\","
+      "\"entry\":price,\"expiry_min\":minutes,\"confidence\":0.0-1.0,"
       "\"risk_percent\":0.0-%.2f,\"sl\":price,\"tp\":price,\"reason\":\"max 30 words\"}. "
+      "%s"
       "risk_percent is %% of equity lost if SL is hit: lower it for high volatility, weak confluence, nearby "
       "major levels, or exposure correlated with open positions. BUY fills at ask, SELL at bid. SL beyond a "
-      "logical swing level, %.1f-%.1f ATR from entry. TP at least %.1f x SL distance at a realistic target. "
+      "logical swing level, %.1f-%.1f ATR from entry. TP at least %.1f x SL distance at a realistic target; when "
+      "the higher timeframes and momentum favour a break, the target may be the next level BEYOND a nearby one. "
       "Prices with %d decimals. HOLD with risk_percent 0 when the edge is unclear. "
       "Use all context provided: trade with the HIGHER-TIMEFRAME trend unless a clear reversal is confirmed; anchor "
       "SL/TP to KEY LEVELS and VOLUME PROFILE value-area edges/POC; treat the TICK-FLOW PROXY as weak confirmation "
       "only; avoid entries shortly before high-impact news in the ECONOMIC CALENDAR; and review YOUR RECENT TRADES - "
       "do not repeat setups that recently failed in similar conditions, but do not overreact to a single loss.",
-      remaining, g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
-   string user = SymbolContext(idx) + SelfReviewContext() + "Open positions:\n" + PositionsSummary() +
+      remaining, PendingRules(idx), g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
+   string user = SymbolContext(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
    string content, used;
@@ -889,23 +910,36 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
 
    string err = "";
    bool isBuy = (d.action == "BUY");
+   string ord = (InpAllowPending && (d.order == "LIMIT" || d.order == "STOP")) ? d.order : "MARKET";
+   string label = d.action + (ord == "MARKET" ? "" : " " + ord);
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK), bid = SymbolInfoDouble(sym, SYMBOL_BID);
-   double entry = isBuy ? ask : bid;
+   double now = isBuy ? ask : bid;
+   double entry = ord == "MARKET" ? now : NormPrice(sym, d.entry);
    double sl = NormPrice(sym, d.sl), tp = NormPrice(sym, d.tp);
    double atr = Buf(g_hATR[idx]);
    double slDist = MathAbs(entry - sl), tpDist = MathAbs(tp - entry);
    double minStop = StopLevel(sym);
    double riskPct = MathMin(d.risk_pct, riskBudget);
+   int    expiryMin = d.expiryMin > 0 ? (int)MathMin(d.expiryMin, g_cfg.pendingExpiryMin) : g_cfg.pendingExpiryMin;
 
-   if(d.confidence < g_cfg.minConf)                  err = StringFormat("confidence %.2f < %.2f", d.confidence, g_cfg.minConf);
+   if(d.confidence < g_cfg.minConf)                     err = StringFormat("confidence %.2f < %.2f", d.confidence, g_cfg.minConf);
    else if(riskPct <= 0)                                err = "risk_percent <= 0 or no budget";
-   else if(isBuy && !(sl < bid && tp > ask))            err = "BUY needs sl < bid < ask < tp";
-   else if(!isBuy && !(sl > ask && tp < bid))           err = "SELL needs tp < bid < ask < sl";
    else if(atr <= 0)                                    err = "ATR unavailable";
+   else if(ord != "MARKET" && entry <= 0)               err = ord + " order without an entry price";
+   else if(ord == "LIMIT" && isBuy  && !(entry < ask - minStop)) err = "BUY LIMIT must be below ask";
+   else if(ord == "LIMIT" && !isBuy && !(entry > bid + minStop)) err = "SELL LIMIT must be above bid";
+   else if(ord == "STOP"  && isBuy  && !(entry > ask + minStop)) err = "BUY STOP must be above ask";
+   else if(ord == "STOP"  && !isBuy && !(entry < bid - minStop)) err = "SELL STOP must be below bid";
+   else if(ord != "MARKET" && MathAbs(entry - now) > InpPendingMaxAtr * atr)
+                                                        err = StringFormat("pending entry %.2f ATR away (max %.2f)", MathAbs(entry - now) / atr, InpPendingMaxAtr);
+   else if(isBuy && !(sl < entry && tp > entry))        err = "BUY needs sl < entry < tp";
+   else if(!isBuy && !(sl > entry && tp < entry))       err = "SELL needs tp < entry < sl";
+   else if(ord == "MARKET" && isBuy && !(sl < bid))     err = "BUY sl must be below bid";
+   else if(ord == "MARKET" && !isBuy && !(sl > ask))    err = "SELL sl must be above ask";
    else if(slDist < g_cfg.slMin * atr || slDist > g_cfg.slMax * atr)
                                                         err = StringFormat("SL %.2f ATR outside [%.2f, %.2f]", slDist / atr, g_cfg.slMin, g_cfg.slMax);
    else if(slDist <= minStop || tpDist <= minStop)      err = "SL/TP inside broker stop level";
-   else if(tpDist / slDist < g_cfg.minRR)                  err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, g_cfg.minRR);
+   else if(tpDist / slDist < g_cfg.minRR)               err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, g_cfg.minRR);
 
    double lots = 0;
    if(err == "")
@@ -915,26 +949,40 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
      }
    if(err != "")
      {
-      Notify(sym + " entry rejected: " + err);
-      LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, sl, tp, 0, "REJECTED: " + err, d.reason);
+      Notify(sym + " " + label + " rejected: " + err);
+      LogRow("ENTRY", sym, label, d.confidence, d.risk_pct, sl, tp, 0, "REJECTED: " + err, d.reason);
       return;
      }
 
+   string where = ord == "MARKET" ? "" : StringFormat(" @ %s (expires %d min)", Px(sym, entry), expiryMin);
    if(InpDryRun)
      {
-      Notify(StringFormat("[DRY] %s %s %.2f lots risk %.2f%%", d.action, sym, lots, riskPct));
-      LogRow("ENTRY", sym, d.action, d.confidence, riskPct, sl, tp, lots, "DRY_RUN", d.reason);
+      Notify(StringFormat("[DRY] %s %s %.2f lots%s risk %.2f%%", label, sym, lots, where, riskPct));
+      LogRow("ENTRY", sym, label, d.confidence, riskPct, sl, tp, lots, "DRY_RUN" + where, d.reason);
       return;
      }
 
    g_trade.SetTypeFillingBySymbol(sym);
-   string cmt = StringFormat("AI c%.0f r%.2f", d.confidence * 100, riskPct);
-   bool ok = isBuy ? g_trade.Buy(lots, sym, ask, sl, tp, cmt) : g_trade.Sell(lots, sym, bid, sl, tp, cmt);
+   string cmt = StringFormat("AI c%.0f r%.2f x%d", d.confidence * 100, riskPct, expiryMin);
+   bool ok;
+   if(ord == "MARKET")
+      ok = isBuy ? g_trade.Buy(lots, sym, ask, sl, tp, cmt) : g_trade.Sell(lots, sym, bid, sl, tp, cmt);
+   else
+     {
+      // broker-side expiry when supported; ExpirePendings() also cancels it from the EA side
+      bool canExpire = (SymbolInfoInteger(sym, SYMBOL_EXPIRATION_MODE) & SYMBOL_EXPIRATION_SPECIFIED) != 0;
+      ENUM_ORDER_TYPE_TIME tt = canExpire ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
+      datetime exp = canExpire ? TimeTradeServer() + expiryMin * 60 : 0;
+      if(ord == "LIMIT") ok = isBuy ? g_trade.BuyLimit(lots, entry, sym, sl, tp, tt, exp, cmt)
+                                    : g_trade.SellLimit(lots, entry, sym, sl, tp, tt, exp, cmt);
+      else               ok = isBuy ? g_trade.BuyStop(lots, entry, sym, sl, tp, tt, exp, cmt)
+                                    : g_trade.SellStop(lots, entry, sym, sl, tp, tt, exp, cmt);
+     }
    uint rc = g_trade.ResultRetcode();
-   string status = (ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED)) ? "PLACED" :
+   string status = (ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED)) ? "PLACED" + where :
                    "FAILED_" + IntegerToString(rc) + " " + g_trade.ResultRetcodeDescription();
-   Notify(StringFormat("%s %s %.2f lots: %s", d.action, sym, lots, status));
-   LogRow("ENTRY", sym, d.action, d.confidence, riskPct, sl, tp, lots, status, d.reason);
+   Notify(StringFormat("%s %s %.2f lots%s: %s", label, sym, lots, where, status));
+   LogRow("ENTRY", sym, label, d.confidence, riskPct, sl, tp, lots, status, d.reason);
   }
 
 //+------------------------------------------------------------------+
@@ -1196,6 +1244,19 @@ double OpenRiskPct()
                          PositionGetDouble(POSITION_VOLUME), PositionGetDouble(POSITION_PRICE_CURRENT), sl, pnl) && pnl < 0)
          pct += -pnl / eq * 100.0;
      }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!IsOurPending(t)) continue;
+      double sl = OrderGetDouble(ORDER_SL);
+      if(sl == 0) { pct += g_cfg.riskPct; continue; }
+      long type = OrderGetInteger(ORDER_TYPE);
+      bool isBuy = (type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP);
+      double pnl = 0;
+      if(OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, OrderGetString(ORDER_SYMBOL),
+                         OrderGetDouble(ORDER_VOLUME_CURRENT), OrderGetDouble(ORDER_PRICE_OPEN), sl, pnl) && pnl < 0)
+         pct += -pnl / eq * 100.0;
+     }
    return pct;
   }
 
@@ -1336,13 +1397,18 @@ bool CallProvider(AIProvider &p, string model, string system, string user, strin
 
 bool ParseEntry(string content, EntryDecision &d)
   {
-   d.action = ""; d.confidence = 0; d.risk_pct = 0; d.sl = 0; d.tp = 0; d.reason = "";
+   d.action = ""; d.order = "MARKET"; d.entry = 0; d.expiryMin = 0;
+   d.confidence = 0; d.risk_pct = 0; d.sl = 0; d.tp = 0; d.reason = "";
    string o = ExtractJsonObject(content);
    if(o == "") return false;
    d.action = UpperTrim(JsonGetString(o, "action"));
    if(d.action != "BUY" && d.action != "SELL" && d.action != "HOLD") return false;
    d.confidence = NormConf(JsonGetNumber(o, "confidence"));
    d.risk_pct   = JsonGetNumber(o, "risk_percent");
+   string ord   = UpperTrim(JsonGetString(o, "order"));
+   if(ord == "LIMIT" || ord == "STOP") d.order = ord;
+   d.entry      = JsonGetNumber(o, "entry");
+   d.expiryMin  = (int)JsonGetNumber(o, "expiry_min");
    d.sl         = JsonGetNumber(o, "sl");
    d.tp         = JsonGetNumber(o, "tp");
    d.reason     = JsonGetString(o, "reason");
@@ -1661,18 +1727,120 @@ double DayStartEquity()
    return GlobalVariableGet(base + "_eq");
   }
 
+// New entries today: opening market orders + pending orders (filled, expired or still waiting), each once.
 int CountTodayEntries()
   {
-   if(!HistorySelect(DayStart(), TimeCurrent() + 60)) return 0;
    int c = 0;
-   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   if(HistorySelect(DayStart(), TimeCurrent() + 60))
+      for(int i = HistoryOrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong t = HistoryOrderGetTicket(i);
+         if(t == 0 || (ulong)HistoryOrderGetInteger(t, ORDER_MAGIC) != InpMagic) continue;
+         if(IsPendingType(HistoryOrderGetInteger(t, ORDER_TYPE)) ||
+            (ulong)HistoryOrderGetInteger(t, ORDER_POSITION_ID) == t)   // opening market order (not a close)
+            c++;
+        }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
-      ulong t = HistoryDealGetTicket(i);
-      if(t != 0 && (ulong)HistoryDealGetInteger(t, DEAL_MAGIC) == InpMagic &&
-         HistoryDealGetInteger(t, DEAL_ENTRY) == DEAL_ENTRY_IN)
+      ulong t = OrderGetTicket(i);
+      if(t != 0 && (ulong)OrderGetInteger(ORDER_MAGIC) == InpMagic && (datetime)OrderGetInteger(ORDER_TIME_SETUP) >= DayStart())
          c++;
      }
    return c;
+  }
+
+//+------------------------------------------------------------------+
+//| PENDING ORDERS                                                    |
+//+------------------------------------------------------------------+
+bool IsPendingType(long type)
+  {
+   return type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_SELL_LIMIT ||
+          type == ORDER_TYPE_BUY_STOP  || type == ORDER_TYPE_SELL_STOP;
+  }
+
+bool IsOurPending(ulong ticket)
+  {
+   return ticket != 0 && OrderSelect(ticket) && (ulong)OrderGetInteger(ORDER_MAGIC) == InpMagic &&
+          IsPendingType(OrderGetInteger(ORDER_TYPE));
+  }
+
+int CountPendings()
+  {
+   int c = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--) if(IsOurPending(OrderGetTicket(i))) c++;
+   return c;
+  }
+
+bool HasPending(string sym)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+      if(IsOurPending(OrderGetTicket(i)) && OrderGetString(ORDER_SYMBOL) == sym) return true;
+   return false;
+  }
+
+void CancelPendings(string why)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!IsOurPending(t)) continue;
+      string sym = OrderGetString(ORDER_SYMBOL);
+      bool ok = InpDryRun ? true : g_trade.OrderDelete(t);
+      Notify(StringFormat("pending #%I64u %s cancelled (%s)%s", t, sym, why, ok ? "" : " FAILED"));
+      LogRow("CLOSE", sym, "CANCEL PENDING", 0, 0, 0, 0, OrderGetDouble(ORDER_VOLUME_CURRENT), ok ? "DONE" : "FAILED", why);
+     }
+  }
+
+// EA-side expiry (also covers brokers without ORDER_TIME_SPECIFIED). Lifetime is stored as " xNN" in the comment.
+void ExpirePendings()
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!IsOurPending(t)) continue;
+      string cmt = OrderGetString(ORDER_COMMENT);
+      int p = StringFind(cmt, " x");
+      int life = p >= 0 ? (int)StringToInteger(StringSubstr(cmt, p + 2)) : g_cfg.pendingExpiryMin;
+      if(life <= 0) life = g_cfg.pendingExpiryMin;
+      datetime setup = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      if(TimeCurrent() - setup >= (long)life * 60 && !InpDryRun)
+        {
+         string sym = OrderGetString(ORDER_SYMBOL);
+         if(g_trade.OrderDelete(t)) Notify(StringFormat("pending #%I64u %s expired after %d min", t, sym, life));
+        }
+     }
+  }
+
+string PendingSummary()
+  {
+   string s = "";
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!IsOurPending(t)) continue;
+      string sym = OrderGetString(ORDER_SYMBOL);
+      s += StringFormat("  %s %s @ %s sl %s tp %s\n", sym, EnumToString((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE)),
+                        Px(sym, OrderGetDouble(ORDER_PRICE_OPEN)), Px(sym, OrderGetDouble(ORDER_SL)), Px(sym, OrderGetDouble(ORDER_TP)));
+     }
+   return s == "" ? "" : "Pending orders of this EA:\n" + s;
+  }
+
+// Order-type rules for the entry prompt.
+string PendingRules(int idx)
+  {
+   if(!InpAllowPending)
+      return "Only MARKET orders are allowed: BUY fills at ask, SELL at bid. ";
+   string sym = g_syms[idx];
+   double atr = Buf(g_hATR[idx]);
+   return StringFormat(
+      "order: MARKET fills now (BUY at ask, SELL at bid) - use it only when the setup is valid right now. "
+      "If your plan is to WAIT for a pullback, retest or rejection at a level, do NOT answer HOLD: place a LIMIT "
+      "order at that level (BUY LIMIT below price, SELL LIMIT above price). To trade a confirmed break, place a STOP "
+      "order just beyond the level (BUY STOP above price, SELL STOP below price). entry is the pending price, at "
+      "most %.1f ATR (%s) from current price; expiry_min is how long the idea stays valid (max %d). For a pending "
+      "order, SL, TP and reward:risk are measured from entry, so a better entry improves reward:risk. HOLD only when "
+      "there is no clear plan at all. ",
+      InpPendingMaxAtr, Px(sym, InpPendingMaxAtr * atr), g_cfg.pendingExpiryMin);
   }
 
 //+------------------------------------------------------------------+
@@ -2597,8 +2765,9 @@ void DrawDecision(string stage, string action, string status, double conf, strin
    double off = idx >= 0 ? Buf(g_hATR[idx]) * 0.4 : 0;
    int code; color c; double y; ENUM_ARROW_ANCHOR anc = ANCHOR_TOP;
    bool rejected = StringFind(status, "REJECTED") == 0 || StringFind(status, "IGNORED") == 0;
-   if(stage == "ENTRY" && action == "BUY" && !rejected)       { code = 233; c = C'60,200,120'; y = px - off; anc = ANCHOR_TOP; }
-   else if(stage == "ENTRY" && action == "SELL" && !rejected) { code = 234; c = C'240,80,80';  y = px + off; anc = ANCHOR_BOTTOM; }
+   bool isB = StringFind(action, "BUY") == 0, isS = StringFind(action, "SELL") == 0;
+   if(stage == "ENTRY" && isB && !rejected)       { code = 233; c = C'60,200,120'; y = px - off; anc = ANCHOR_TOP; }
+   else if(stage == "ENTRY" && isS && !rejected) { code = 234; c = C'240,80,80';  y = px + off; anc = ANCHOR_BOTTOM; }
    else if(rejected)                                          { code = 251; c = C'255,190,60'; y = px + off; anc = ANCHOR_BOTTOM; }
    else if(stage == "ENTRY")                                  { code = 159; c = C'120,130,150'; y = px + off; anc = ANCHOR_BOTTOM; }
    else                                                       { code = 115; c = C'0,190,255';  y = px - off; anc = ANCHOR_TOP; }
