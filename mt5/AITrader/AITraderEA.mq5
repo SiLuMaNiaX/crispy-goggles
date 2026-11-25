@@ -191,7 +191,7 @@ input group "Market context & news (fed to the AI)"
 input bool             InpNewsFilter      = true;                    // 1. Block entries around economic news
 input string           InpNewsCurrencies  = "USD";                   //    News currencies (comma separated)
 input int              InpNewsMinImportance = 3;                     //    Min importance (3 = high, 2 = moderate+)
-input int              InpNewsBeforeMin   = 30;                      //    Block entries N min before an event
+input int              InpNewsBeforeMin   = 15;                      //    Block entries N min before an event
 input int              InpNewsAfterMin    = 15;                      //    ...and N min after
 input bool             InpNewsClosePositions = false;                //    Also close open positions in the news window
 input bool             InpNewsGoldOnly    = true;                    //    Only events that move gold (keyword list below)

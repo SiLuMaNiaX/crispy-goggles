@@ -252,7 +252,7 @@ Switch *AI may use LIMIT / STOP orders* off for market-only behaviour.
 
 | # | Feature | What the AI or EA gets | Input |
 |---|---|---|---|
-| 1 | **News filter** | MT5's economic calendar. **New entries are blocked** from 30 min before to 15 min after high-impact USD events. This is a hard rule the AI can't override. The AI is also told what's coming up. | *Block entries around economic news*, currencies, importance, minutes before/after, optional close |
+| 1 | **News filter** | MT5's economic calendar. **New entries are blocked** from 15 min before to 15 min after high-impact USD events. This is a hard rule the AI can't override. The AI is also told what's coming up. | *Block entries around economic news*, currencies, importance, minutes before/after, optional close |
 | 2 | **Performance panel** | Closed trades, win rate, net P/L, profit factor, max drawdown and average R for this EA's magic number only, plus a PROOF line (30+ trades, net > 0, PF > 1.2). | *Performance stats from* |
 | 3 | **Key levels** | Previous day high/low/close, today open/high/low, week open, previous week high/low, Asian range, London and New York open prices (DST-aware), nearest round numbers. | *Key levels* |
 | 4 | **Higher timeframes** | Two higher timeframes (M5 → M15 + H1, M15 → H1 + H4, H4 → D1 + W1): trend, EMA20/50, RSI, 20-bar high/low, last 6 bars. | *Higher-timeframe trend* |
