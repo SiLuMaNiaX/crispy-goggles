@@ -836,7 +836,7 @@ void EvaluateEntry(int idx, string bias, double score, string note)
    if(InpDiscretion) system = DiscretionEntryPrompt(idx, remaining);
    else system += " For every BUY or SELL also add \"thesis\" (why, max 80 words), \"invalidation\" (what proves it "
                   "wrong) and \"plan\" (how you will manage and exit) to the JSON - they are recorded in the trading journal.";
-   string user = SymbolContext(idx) + SizingHint(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
+   string user = SymbolContext(idx) + SizingHint(idx) + RecentDecisions(sym) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity (BUY side max %.2f%%, SELL side max %.2f%%)\n",
                               remaining, MathMin(remaining, SideBudget(sym, true)), MathMin(remaining, SideBudget(sym, false)));
 
@@ -892,6 +892,7 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    if(d.action != "BUY" && d.action != "SELL")
      {
       Notify(StringFormat("%s HOLD (conf %.2f): %s", sym, d.confidence, d.reason));
+      RememberDecision(sym, "HOLD: " + d.reason);
       LogRow("ENTRY", sym, "HOLD", d.confidence, d.risk_pct, d.sl, d.tp, 0, "HOLD", d.reason);
       return;
      }
@@ -951,6 +952,7 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    if(err != "")
      {
       Notify(sym + " " + label + " rejected: " + err);
+      RememberDecision(sym, label + " (rejected by EA: " + err + "): " + d.reason);
       LogRow("ENTRY", sym, label, d.confidence, d.risk_pct, sl, tp, 0, "REJECTED: " + err, d.reason);
       return;
      }
@@ -985,6 +987,7 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    string status = (ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED)) ? "PLACED" + where :
                    "FAILED_" + IntegerToString(rc) + " " + g_trade.ResultRetcodeDescription();
    Notify(StringFormat("%s %s %.2f lots%s: %s", label, sym, lots, where, status));
+   RememberDecision(sym, StringFormat("%s @ %s sl %s tp %s -> %s: %s", label, Px(sym, entry), Px(sym, sl), Px(sym, tp), status, d.reason));
    LogRow("ENTRY", sym, label, d.confidence, riskPct, sl, tp, lots, status, d.reason + (d.thesis != "" ? " | thesis: " + d.thesis : ""));
    if(StringFind(status, "PLACED") == 0)
       JournalOpen(idx, g_trade.ResultOrder(), label, ord, lots, entry, sl, tp, riskPct, d);
@@ -3191,6 +3194,10 @@ string DiscretionEntryPrompt(int idx, double remaining)
       "to place ONE trade now. You choose the direction, order type, entry, stop-loss, take-profit and how much to "
       "risk. The market data below is information only - weigh it however you see fit, or ignore it. HOLD is a valid "
       "answer whenever you see no trade worth taking.\n"
+      "HOW THIS TOOL WORKS: you are consulted once per %s bar (every %d minutes) and cannot watch price in between. "
+      "HOLD places nothing. If your idea depends on price first reaching a level (e.g. a retest or rejection) or "
+      "breaking one, place it now as a LIMIT or STOP order at that level - it waits for you and expires after "
+      "expiry_min. Your recent decisions are listed in the data so you can follow through on what you were waiting for.\n"
       "Hard limits enforced by the EA (anything outside them is rejected):\n%s"
       "Reply ONLY with JSON: {\"action\":\"BUY\"|\"SELL\"|\"HOLD\",\"order\":\"MARKET\"|\"LIMIT\"|\"STOP\","
       "\"entry\":price,\"expiry_min\":minutes,\"confidence\":0.0-1.0,\"risk_percent\":number,"
@@ -3199,7 +3206,7 @@ string DiscretionEntryPrompt(int idx, double remaining)
       "TRADING JOURNAL: for every BUY or SELL you must explain yourself - thesis = why you are taking this trade and "
       "what edge you see (max 80 words); invalidation = what price action would prove the idea wrong; plan = how you "
       "intend to manage and exit it. These are recorded with the outcome and shown back to you in future decisions.",
-      sym, limits, SymDigits(sym));
+      sym, TfName(g_cfg.scanTF), PeriodSeconds(g_cfg.scanTF) / 60, limits, SymDigits(sym));
   }
 
 //+------------------------------------------------------------------+
@@ -3443,4 +3450,33 @@ bool GoldRelevant(string name)
       if(StringFind(n, key) >= 0) return true;
      }
    return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Short-term memory: the model's own last few entry decisions       |
+//+------------------------------------------------------------------+
+string   g_decSym[];
+string   g_decTxt[];
+datetime g_decAt[];
+
+void RememberDecision(string sym, string txt)
+  {
+   int n = ArraySize(g_decSym);
+   ArrayResize(g_decSym, n + 1); ArrayResize(g_decTxt, n + 1); ArrayResize(g_decAt, n + 1);
+   g_decSym[n] = sym; g_decTxt[n] = StringSubstr(txt, 0, 300); g_decAt[n] = TimeCurrent();
+   if(n + 1 > 30) { ArrayRemove(g_decSym, 0, 1); ArrayRemove(g_decTxt, 0, 1); ArrayRemove(g_decAt, 0, 1); }
+  }
+
+string RecentDecisions(string sym)
+  {
+   string s = "";
+   int shown = 0;
+   for(int i = ArraySize(g_decSym) - 1; i >= 0 && shown < 4; i--)
+     {
+      if(g_decSym[i] != sym) continue;
+      s += StringFormat("  %s (%d min ago) %s\n", TimeToString(g_decAt[i], TIME_MINUTES),
+                        (int)((TimeCurrent() - g_decAt[i]) / 60), g_decTxt[i]);
+      shown++;
+     }
+   return s == "" ? "" : "YOUR LAST DECISIONS ON " + sym + " (newest first):\n" + s;
   }
