@@ -170,7 +170,7 @@ input bool             InpCloseOnDailyLoss= true;                    // Close al
 input double           InpMaxSpreadAtr    = 0.15;                    // [Custom] Max spread as fraction of ATR
 
 input group "Misc"
-input ulong            InpMagic           = 26112402;                // Magic number
+input ulong            InpMagic           = 26112501;                // Magic number
 input int              InpSlippagePts     = 30;                      // Max slippage (points)
 input int              InpTimerSec        = 0;                       // Timer interval seconds (0 = mode default)
 input string           InpLogFile         = "AITraderEA_log.csv";    // Log file in MQL5\Files
