@@ -92,7 +92,8 @@ input group "STRATEGY PROFILE"
 input ENUM_TRADE_MODE   InpTradeMode      = MODE_INTRADAY;           // Trading mode
 input ENUM_SESSION_BIAS InpSession        = SESSION_NONE;            // Session bias
 input ENUM_RISK_PROFILE InpRiskProfile    = PROFILE_CONSERVATIVE;    // Risk profile
-input bool              InpCloseAtSessionEnd = true;                 // Non-swing modes: close positions when the session ends
+input bool              InpCloseAtSessionEnd = false;                // Close positions when the session ends (non-swing modes)
+input int               InpMaxHoldMinutes = 0;                       // Max hold time in minutes (0 = no limit, -1 = mode default)
 input bool              InpDiscretion     = true;                    // AI trades on its own judgement (no strategy instructions, only hard limits)
 
 // Each job (entry, scan, manage, review) has its own ordered provider list; the next one is tried when one fails.
@@ -128,7 +129,7 @@ input string           InpChainReview     = "DeepSeek,OpenRouter";   // 2nd-opin
 input group "AI request settings"
 input int              InpFailoverCooldownMin = 10;                  // Skip a failed provider for N minutes
 input double           InpTemperature     = 0.2;                     // Temperature
-input int              InpMaxTokens       = 600;                     // Max response tokens
+input int              InpMaxTokens       = 900;                     // Max response tokens
 input bool             InpJsonMode        = true;                    // Request JSON response_format
 input int              InpTimeoutMs       = 45000;                   // HTTP timeout per provider (ms)
 input int              InpMaxAICallsDay   = 0;                       // Max AI calls per day (0 = mode default)
@@ -161,8 +162,8 @@ input double           InpMinConfidence   = 0.65;                    // [Balance
 input double           InpMinRR           = 1.5;                     // [Custom] Min reward:risk at entry
 input double           InpMinSlAtr        = 0.5;                     // [Custom] Min SL distance (x ATR)
 input double           InpMaxSlAtr        = 3.0;                     // [Custom] Max SL distance (x ATR)
-input int              InpMaxPositions    = 3;                       // [Balanced] Max open positions
-input int              InpMaxPerSymbol    = 3;                       // Max trades per symbol (open positions + pending orders)
+input int              InpMaxPositions    = 0;                       // Max open positions, all symbols (0 = no limit)
+input int              InpMaxPerSymbol    = 0;                       // Max trades per symbol incl. pending (0 = no limit)
 input bool             InpNoAveragingDown = true;                    // Same-direction add only if existing trades are in profit
 input bool             InpAllowOpposite   = false;                   // Allow a trade opposite to an open position (hedge)
 input bool             InpStructureFilter = false;                   // Block trades against the decision-timeframe swing structure
@@ -176,6 +177,7 @@ input ulong            InpMagic           = 26112501;                // Magic nu
 input int              InpSlippagePts     = 30;                      // Max slippage (points)
 input int              InpTimerSec        = 0;                       // Timer interval seconds (0 = mode default)
 input string           InpLogFile         = "AITraderEA_log.csv";    // Log file in MQL5\Files
+input string           InpJournalFile     = "AITraderEA_journal.csv"; // Trading journal in MQL5\Files (why each trade was taken + outcome)
 
 input group "Pending orders"
 input bool             InpAllowPending    = true;                    // AI may use LIMIT / STOP orders (e.g. "sell the retest at X")
@@ -221,6 +223,9 @@ struct EntryDecision
    double            entry;      // pending entry price
    int               expiryMin;  // pending lifetime
    string            shadow;     // reviewer verdict: A agree, D disagree, N n/a, "" not reviewed
+   string            thesis;     // why the trade is taken
+   string            invalidation; // what would prove it wrong
+   string            plan;       // exit / management plan
    double            confidence;
    double            risk_pct;
    double            sl;
@@ -329,6 +334,7 @@ int OnInit()
    ArrayResize(g_prov, 0);
    ArrayResize(g_syms, 0);
    g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
+   JournalLoad();
    g_newsLoaded = 0; g_tradesDirty = true; ArrayResize(g_news, 0); ArrayResize(g_trades, 0);
    g_vizLast = 0; ArrayResize(g_vizMarkers, 0);
    g_sizingText = ""; g_sizingState = -1; g_sizingAt = 0;
@@ -465,6 +471,7 @@ bool BuildConfig()
          break;
      }
    g_cfg.fridayClose = !(InpTradeMode == MODE_SWING && InpSwingHoldWeekend);
+   if(InpMaxHoldMinutes >= 0) g_cfg.maxHoldMin = InpMaxHoldMinutes;   // 0 = hold as long as the trade lives
    int expDefault[] = {15, 45, 240, 1440, 120};          // superscalp, scalp, intraday, swing, custom
    g_cfg.pendingExpiryMin = InpPendingExpiryMin > 0 ? InpPendingExpiryMin : expDefault[(int)InpTradeMode];
    if(InpTimerSec > 0)      g_cfg.timerSec = (int)MathMax(2, InpTimerSec);
@@ -481,14 +488,14 @@ bool BuildConfig()
          riskMult = 0.75; tradesMult = 0.6;
          g_cfg.minConf = MathMax(g_cfg.minConf, 0.72);       g_cfg.minRR += 0.3;
          g_cfg.minManageConf = MathMax(g_cfg.minManageConf, 0.70);
-         g_cfg.maxPositions = (int)MathMin(g_cfg.maxPositions, 2);
+         if(g_cfg.maxPositions > 0) g_cfg.maxPositions = (int)MathMin(g_cfg.maxPositions, 2);
          g_cfg.profileText = "CONSERVATIVE: capital preservation first. Only trend-aligned, high-probability setups; "
                              "lower risk when uncertain; take partial profits and move SL to breakeven early.";
          break;
       case PROFILE_AGGRESSIVE:
          riskMult = 1.5; tradesMult = 1.5;
          g_cfg.minConf = MathMin(g_cfg.minConf, 0.60);       g_cfg.minRR = MathMax(1.0, g_cfg.minRR - 0.3);
-         g_cfg.maxPositions += 2;
+         if(g_cfg.maxPositions > 0) g_cfg.maxPositions += 2;
          g_cfg.profileText = "AGGRESSIVE: take more opportunities including momentum breakouts and well-defined "
                              "counter-trend fades; use the upper part of the risk range on strong setups; let "
                              "winners run with trailing stops. Never average down.";
@@ -650,7 +657,7 @@ string ProfileName()
 string ProfileBrief()
   {
    if(InpDiscretion)
-      return StringFormat("CONTEXT - holding period: %s (decisions every %s bar, positions are closed after %s%s). "
+      return StringFormat("CONTEXT - trading style: %s (decisions every %s bar; time limit on positions: %s%s). "
                           "Session window: %s. Time now: %s.",
                           ModeName(), TfName(g_cfg.scanTF), HoldText(),
                           (InpCloseAtSessionEnd && g_cfg.mode != MODE_SWING) ? " or at the end of the session window" : "",
@@ -726,7 +733,7 @@ void ScanAndEnter()
      {
       if(ScanRow(i) == "") continue;              // no data, market closed, or spread too wide vs ATR
       tradeable++;
-      if(SymbolExposure(g_syms[i]) >= MathMax(1, InpMaxPerSymbol)) continue;
+      if(InpMaxPerSymbol > 0 && SymbolExposure(g_syms[i]) >= InpMaxPerSymbol) continue;
       if(!EntryAllowed(why)) { Print("AITrader: stop entries - ", why); break; }
       g_lastScan += g_syms[i] + " ";
       PrintFormat("AITrader: entry check %s", g_syms[i]);
@@ -744,7 +751,7 @@ bool EntryAllowed(string &why)
    if(NewsBlocked(news))                              { why = "news window: " + news; return false; }
    if(IsFridayClose())                                { why = "Friday close window"; return false; }
    if(!InSession())                                   { why = "outside " + SessionName() + " session"; return false; }
-   if(CountPositions() + CountPendings() >= g_cfg.maxPositions) { why = "max positions (incl. pending orders)"; return false; }
+   if(g_cfg.maxPositions > 0 && CountPositions() + CountPendings() >= g_cfg.maxPositions) { why = "max positions (incl. pending orders)"; return false; }
    if(CountTodayEntries() >= g_cfg.maxTradesDay)         { why = "max trades today"; return false; }
    if(OpenRiskPct() >= InpMaxTotalRiskPct - 0.01)     { why = "total open risk cap"; return false; }
    if(g_calls >= g_cfg.maxCalls)                    { why = "AI call budget"; return false; }
@@ -816,6 +823,8 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "separate, high-quality setup - never add to a losing position, and do not duplicate an existing order.",
       remaining, PendingRules(idx), g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
    if(InpDiscretion) system = DiscretionEntryPrompt(idx, remaining);
+   else system += " For every BUY or SELL also add \"thesis\" (why, max 80 words), \"invalidation\" (what proves it "
+                  "wrong) and \"plan\" (how you will manage and exit) to the JSON - they are recorded in the trading journal.";
    string user = SymbolContext(idx) + SizingHint(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
@@ -907,7 +916,7 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
                                                         err = StringFormat("SL %.2f ATR outside [%.2f, %.2f]", slDist / atr, g_cfg.slMin, g_cfg.slMax);
    else if(slDist <= minStop || tpDist <= minStop)      err = "SL/TP inside broker stop level";
    else if(tpDist / slDist < g_cfg.minRR)               err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, g_cfg.minRR);
-   else if(SymbolExposure(sym) >= MathMax(1, InpMaxPerSymbol)) err = StringFormat("max %d trades on %s", InpMaxPerSymbol, sym);
+   else if(InpMaxPerSymbol > 0 && SymbolExposure(sym) >= InpMaxPerSymbol) err = StringFormat("max %d trades on %s", InpMaxPerSymbol, sym);
    else                                                 err = StackingRule(sym, isBuy);
    if(err == "") err = StructureRule(idx, isBuy, ord, entry);
 
@@ -929,6 +938,7 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
      {
       Notify(StringFormat("[DRY] %s %s %.2f lots%s risk %.2f%%", label, sym, lots, where, riskPct));
       LogRow("ENTRY", sym, label, d.confidence, riskPct, sl, tp, lots, "DRY_RUN" + where, d.reason);
+      JournalOpen(idx, 0, label + " (dry run)", ord, lots, entry, sl, tp, riskPct, d);
       return;
      }
 
@@ -953,7 +963,9 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    string status = (ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED)) ? "PLACED" + where :
                    "FAILED_" + IntegerToString(rc) + " " + g_trade.ResultRetcodeDescription();
    Notify(StringFormat("%s %s %.2f lots%s: %s", label, sym, lots, where, status));
-   LogRow("ENTRY", sym, label, d.confidence, riskPct, sl, tp, lots, status, d.reason);
+   LogRow("ENTRY", sym, label, d.confidence, riskPct, sl, tp, lots, status, d.reason + (d.thesis != "" ? " | thesis: " + d.thesis : ""));
+   if(StringFind(status, "PLACED") == 0)
+      JournalOpen(idx, g_trade.ResultOrder(), label, ord, lots, entry, sl, tp, riskPct, d);
   }
 
 //+------------------------------------------------------------------+
@@ -1031,6 +1043,7 @@ void ManageOne(ulong ticket)
 
    if(m.action == "CLOSE")
      {
+      JournalEvent("MANAGE", (ulong)PositionGetInteger(POSITION_IDENTIFIER), sym, "CLOSE", m.reason);
       ClosePosition(ticket, "AI: " + m.reason);
       return;
      }
@@ -1045,6 +1058,7 @@ void ManageOne(ulong ticket)
       part = NormalizeDouble(part, VolDigits(step));
       if(InpDryRun) { LogRow("MANAGE", sym, "PARTIAL", m.confidence, 0, 0, 0, part, "DRY_RUN", m.reason); return; }
       bool ok = g_trade.PositionClosePartial(ticket, part);
+      if(ok) JournalEvent("MANAGE", ticket, sym, StringFormat("PARTIAL %.2f lots", part), m.reason);
       Notify(StringFormat("partial close %s %.2f: %s", sym, part, ok ? "OK" : g_trade.ResultRetcodeDescription()));
       LogRow("MANAGE", sym, "PARTIAL", m.confidence, 0, 0, 0, part, ok ? "DONE" : "FAILED", m.reason);
       return;
@@ -1072,6 +1086,7 @@ void ManageOne(ulong ticket)
         { LogRow("MANAGE", sym, "MODIFY", m.confidence, 0, m.new_sl, m.new_tp, vol, "REJECTED: " + notes, m.reason); return; }
       if(InpDryRun) { LogRow("MANAGE", sym, "MODIFY", m.confidence, 0, nsl, ntp, vol, "DRY_RUN " + notes, m.reason); return; }
       bool ok = g_trade.PositionModify(ticket, nsl, ntp);
+      if(ok) JournalEvent("MANAGE", ticket, sym, StringFormat("MODIFY sl %s tp %s", DoubleToString(nsl, dg), DoubleToString(ntp, dg)), m.reason);
       Notify(StringFormat("modify %s sl %s tp %s: %s", sym, DoubleToString(nsl, dg), DoubleToString(ntp, dg),
                          ok ? "OK" : g_trade.ResultRetcodeDescription()));
       LogRow("MANAGE", sym, "MODIFY", m.confidence, 0, nsl, ntp, vol, (ok ? "DONE " : "FAILED ") + notes, m.reason);
@@ -1399,6 +1414,7 @@ bool CallProvider(AIProvider &p, string model, string system, string user, strin
 bool ParseEntry(string content, EntryDecision &d)
   {
    d.action = ""; d.order = "MARKET"; d.entry = 0; d.expiryMin = 0; d.shadow = "";
+   d.thesis = ""; d.invalidation = ""; d.plan = "";
    d.confidence = 0; d.risk_pct = 0; d.sl = 0; d.tp = 0; d.reason = "";
    string o = ExtractJsonObject(content);
    if(o == "") return false;
@@ -1413,6 +1429,9 @@ bool ParseEntry(string content, EntryDecision &d)
    d.sl         = JsonGetNumber(o, "sl");
    d.tp         = JsonGetNumber(o, "tp");
    d.reason     = JsonGetString(o, "reason");
+   d.thesis       = JsonGetString(o, "thesis");
+   d.invalidation = JsonGetString(o, "invalidation");
+   d.plan         = JsonGetString(o, "plan");
    return true;
   }
 
@@ -1978,8 +1997,9 @@ void UpdateDashboard()
    double openRisk = OpenRiskPct();
    if(g_sizingText != "")
       PanelAddWrapped("SIZING", g_sizingText, g_sizingState == 2 ? CLR_GOOD : (g_sizingState == 1 ? CLR_WARN : CLR_BAD));
-   PanelAddWrapped("EXPOSURE", StringFormat("open risk %.2f%% / %.2f%% | positions %d/%d | trades today %d/%d",
-                   openRisk, InpMaxTotalRiskPct, CountPositions(), g_cfg.maxPositions,
+   PanelAddWrapped("EXPOSURE", StringFormat("open risk %.2f%% / %.2f%% | positions %d/%s | trades today %d/%d",
+                   openRisk, InpMaxTotalRiskPct, CountPositions(),
+                   g_cfg.maxPositions > 0 ? IntegerToString(g_cfg.maxPositions) : "no limit",
                    CountTodayEntries(), g_cfg.maxTradesDay),
                    openRisk >= InpMaxTotalRiskPct - 0.01 ? CLR_WARN : CLR_TEXT);
    if(InpNewsFilter)
@@ -2279,6 +2299,7 @@ void LoadTrades()
    for(int i = 1; i < ArraySize(g_trades); i++)
       for(int j = i; j > 0 && g_trades[j].closeTime < g_trades[j - 1].closeTime; j--)
         { ClosedTrade tmp = g_trades[j]; g_trades[j] = g_trades[j - 1]; g_trades[j - 1] = tmp; }
+   JournalCloses();
   }
 
 // Stats over the most recent 'lastN' trades (0 = all).
@@ -2323,6 +2344,8 @@ string SelfReviewContext()
                         TimeToString(c.openTime, TIME_DATE | TIME_MINUTES), c.dir > 0 ? "BUY" : "SELL", c.sym,
                         Px(c.sym, c.openPrice), Px(c.sym, c.closePrice), c.exitReason, c.net, cur, c.rMult,
                         (int)(((long)c.closeTime - (long)c.openTime) / 60));
+      string why = JournalThesis(c.posId);
+      if(why != "") s += "    your thesis was: " + StringSubstr(why, 0, 220) + "\n";
      }
    return s;
   }
@@ -2978,6 +3001,8 @@ void TrailingStops()
       if(g_trade.PositionModify(t, newSl, tp))
         {
          Notify(StringFormat("trailing stop %s -> %s (profit %.2fR)", sym, Px(sym, newSl), profit / risk));
+         JournalEvent("TRAIL", (ulong)PositionGetInteger(POSITION_IDENTIFIER), sym, "SL -> " + Px(sym, newSl),
+                      StringFormat("mechanical trail at %.2fR", profit / risk));
          LogRow("MANAGE", sym, "TRAIL", 0, 0, newSl, tp, PositionGetDouble(POSITION_VOLUME), "DONE",
                 StringFormat("mechanical trail %.1f ATR, profit %.2fR", InpTrailAtr, profit / risk));
         }
@@ -3109,11 +3134,11 @@ string DiscretionEntryPrompt(int idx, double remaining)
       "- stop-loss %.1f-%.1f x ATR from entry (ATR now %s), take-profit at least %.1f x the stop distance\n"
       "- order MARKET (BUY fills at ask, SELL at bid)%s\n"
       "- no new entries from %d min before to %d min after high-impact %s news; spread must be <= %.2f x ATR\n"
-      "- at most %d trades on %s at once; %s%s\n",
+      "- %s%s%s\n",
       remaining, g_cfg.slMin, g_cfg.slMax, Px(sym, atr), g_cfg.minRR,
       InpAllowPending ? StringFormat(", LIMIT or STOP (entry within %.1f x ATR of price, expiry_min up to %d)", InpPendingMaxAtr, g_cfg.pendingExpiryMin) : "",
       InpNewsBeforeMin, InpNewsAfterMin, InpNewsCurrencies, g_cfg.maxSpreadAtr,
-      MathMax(1, InpMaxPerSymbol), sym,
+      InpMaxPerSymbol > 0 ? StringFormat("at most %d trades on %s at once; ", InpMaxPerSymbol, sym) : "",
       InpNoAveragingDown ? "no adding to a losing position; " : "",
       InpAllowOpposite ? "" : "no trade opposite to an open position");
    if(InpStructureFilter)
@@ -3126,6 +3151,137 @@ string DiscretionEntryPrompt(int idx, double remaining)
       "Hard limits enforced by the EA (anything outside them is rejected):\n%s"
       "Reply ONLY with JSON: {\"action\":\"BUY\"|\"SELL\"|\"HOLD\",\"order\":\"MARKET\"|\"LIMIT\"|\"STOP\","
       "\"entry\":price,\"expiry_min\":minutes,\"confidence\":0.0-1.0,\"risk_percent\":number,"
-      "\"sl\":price,\"tp\":price,\"reason\":\"max 30 words\"}. Prices with %d decimals.",
+      "\"sl\":price,\"tp\":price,\"reason\":\"max 30 words\",\"thesis\":\"...\",\"invalidation\":\"...\","
+      "\"plan\":\"...\"}. Prices with %d decimals.\n"
+      "TRADING JOURNAL: for every BUY or SELL you must explain yourself - thesis = why you are taking this trade and "
+      "what edge you see (max 80 words); invalidation = what price action would prove the idea wrong; plan = how you "
+      "intend to manage and exit it. These are recorded with the outcome and shown back to you in future decisions.",
       sym, limits, SymDigits(sym));
+  }
+
+//+------------------------------------------------------------------+
+//| TRADING JOURNAL  (MQL5\Files\<InpJournalFile>)                    |
+//| OPEN   - why the trade was taken (thesis, invalidation, plan) and |
+//|          the market conditions at that moment                     |
+//| MANAGE / TRAIL - every management action with its reason          |
+//| CLOSE  - outcome (net, R, exit reason, time held)                 |
+//+------------------------------------------------------------------+
+ulong  g_jIds[];      // positions with an OPEN row -> thesis
+string g_jThesis[];
+ulong  g_jClosed[];   // positions that already have a CLOSE row
+
+string JClean(string v)
+  {
+   StringReplace(v, ",", ";"); StringReplace(v, "\r", " "); StringReplace(v, "\n", " "); StringReplace(v, "\"", "'");
+   return v;
+  }
+
+void JournalWriteLine(string line)
+  {
+   int h = FileOpen(InpJournalFile, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+   if(h == INVALID_HANDLE) return;
+   if(FileSize(h) == 0)
+      FileWriteString(h, "time,event,position,symbol,side,order,lots,entry,sl,tp,risk_pct,confidence,review,session,"
+                         "structure,higher_tf,atr,spread,thesis,invalidation,plan,net,r_multiple,exit,held_min,note\r\n");
+   FileSeek(h, 0, SEEK_END);
+   FileWriteString(h, line + "\r\n");
+   FileClose(h);
+  }
+
+string TrendLabel(string sym, ENUM_TIMEFRAMES tf)
+  {
+   double c[];
+   ArraySetAsSeries(c, false);
+   if(CopyClose(sym, tf, 1, 150, c) < 60) return "?";
+   double e20 = EmaOf(c, 20), e50 = EmaOf(c, 50), last = c[ArraySize(c) - 1];
+   return (last > e20 && e20 > e50) ? "UP" : (last < e20 && e20 < e50) ? "DOWN" : "MIXED";
+  }
+
+void JournalOpen(int idx, ulong ticket, string side, string ord, double lots, double entry, double sl, double tp,
+                 double riskPct, EntryDecision &d)
+  {
+   string sym = g_syms[idx];
+   double hi, lo; string det;
+   string st = StructureState(idx, hi, lo, det);
+   ENUM_TIMEFRAMES a, b;
+   HigherTFs(g_cfg.scanTF, a, b);
+   string htf = TfName(a) + " " + TrendLabel(sym, a) + " / " + TfName(b) + " " + TrendLabel(sym, b);
+   string review = d.shadow == "A" ? "agreed" : d.shadow == "D" ? "disagreed" : d.shadow == "N" ? "n/a" : "";
+   string session = SessionName() + (InSession() ? " open" : " closed");
+   double spread = SymbolInfoDouble(sym, SYMBOL_ASK) - SymbolInfoDouble(sym, SYMBOL_BID);
+   string line = StringFormat("%s,OPEN,%I64u,%s,%s,%s,%.2f,%s,%s,%s,%.2f,%.2f,%s,%s,%s,%s,%s,%s,%s,%s,%s,,,,,%s",
+                              TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), ticket, sym, JClean(side), ord, lots,
+                              Px(sym, entry), Px(sym, sl), Px(sym, tp), riskPct, d.confidence, review, JClean(session),
+                              st, JClean(htf), Px(sym, Buf(g_hATR[idx])), Px(sym, spread),
+                              JClean(d.thesis == "" ? d.reason : d.thesis), JClean(d.invalidation), JClean(d.plan),
+                              JClean(d.reason));
+   JournalWriteLine(line);
+   if(ticket != 0)
+     {
+      int n = ArraySize(g_jIds);
+      ArrayResize(g_jIds, n + 1); ArrayResize(g_jThesis, n + 1);
+      g_jIds[n] = ticket; g_jThesis[n] = d.thesis == "" ? d.reason : d.thesis;
+     }
+  }
+
+void JournalEvent(string event, ulong posId, string sym, string what, string reason)
+  {
+   JournalWriteLine(StringFormat("%s,%s,%I64u,%s,,,,,,,,,,,,,,,,,,,,,,%s",
+                                 TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), event, posId, sym,
+                                 JClean(what + " - " + reason)));
+  }
+
+// Write a CLOSE row for every closed trade that doesn't have one yet.
+void JournalCloses()
+  {
+   for(int i = 0; i < ArraySize(g_trades); i++)
+     {
+      ClosedTrade c = g_trades[i];
+      bool done = false;
+      for(int k = 0; k < ArraySize(g_jClosed); k++) if(g_jClosed[k] == c.posId) { done = true; break; }
+      if(done) continue;
+      JournalWriteLine(StringFormat("%s,CLOSE,%I64u,%s,%s,,%.2f,%s,,,,,,,,,,,,,,%.2f,%.2f,%s,%d,closed at %s",
+                                    TimeToString(c.closeTime, TIME_DATE | TIME_SECONDS), c.posId, c.sym,
+                                    c.dir > 0 ? "BUY" : "SELL", c.volume, Px(c.sym, c.openPrice), c.net, c.rMult,
+                                    c.exitReason, (int)(((long)c.closeTime - (long)c.openTime) / 60),
+                                    Px(c.sym, c.closePrice)));
+      int n = ArraySize(g_jClosed);
+      ArrayResize(g_jClosed, n + 1);
+      g_jClosed[n] = c.posId;
+     }
+  }
+
+// Read back theses and already-journaled closes so a restart neither forgets nor duplicates.
+void JournalLoad()
+  {
+   ArrayResize(g_jIds, 0); ArrayResize(g_jThesis, 0); ArrayResize(g_jClosed, 0);
+   int h = FileOpen(InpJournalFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE);
+   if(h == INVALID_HANDLE) return;
+   while(!FileIsEnding(h))
+     {
+      string line = FileReadString(h);
+      string f[];
+      if(StringSplit(line, ',', f) < 3) continue;
+      ulong id = (ulong)StringToInteger(f[2]);
+      if(id == 0) continue;
+      if(f[1] == "OPEN" && ArraySize(f) > 18)
+        {
+         int n = ArraySize(g_jIds);
+         ArrayResize(g_jIds, n + 1); ArrayResize(g_jThesis, n + 1);
+         g_jIds[n] = id; g_jThesis[n] = f[18];
+        }
+      else if(f[1] == "CLOSE")
+        {
+         int n = ArraySize(g_jClosed);
+         ArrayResize(g_jClosed, n + 1);
+         g_jClosed[n] = id;
+        }
+     }
+   FileClose(h);
+  }
+
+string JournalThesis(ulong posId)
+  {
+   for(int i = ArraySize(g_jIds) - 1; i >= 0; i--) if(g_jIds[i] == posId) return g_jThesis[i];
+   return "";
   }

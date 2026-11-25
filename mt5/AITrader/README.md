@@ -152,6 +152,24 @@ Each job has its own ordered list of providers. If the first one fails, the EA t
 
 The provider names are `asAi`, `DeepSeek` and `OpenRouter`. OpenRouter is an optional extra backup: set its *Model slug* to use it. **There is no scanner:** on every decision bar, each tradeable symbol in the watchlist goes straight to the entry model.
 
+## Trading journal
+
+`MQL5\Files\AITraderEA_journal.csv` holds one story per trade:
+
+| Event | What's recorded |
+|---|---|
+| **OPEN** | Side and order type, lots, entry/SL/TP, risk %, confidence, the reviewer's verdict, plus **the AI's own explanation**: **thesis** (why it took the trade and what edge it sees), **invalidation** (what would prove it wrong), **plan** (how it will manage and exit). Also the conditions at entry: session, M5 structure, higher-timeframe trends, ATR, spread. |
+| **MANAGE / TRAIL** | Every close, partial close, SL/TP change and trailing-stop move, with its reason |
+| **CLOSE** | Net P/L, R multiple, how it closed (SL / TP / AI / manual), minutes held, exit price |
+
+The AI must fill in thesis, invalidation and plan for every BUY/SELL. The theses of its recent closed trades are shown back to it before each new decision, next to their results. The file survives restarts and isn't duplicated.
+
+## Position limits and holding time (current defaults)
+
+- *Max open positions* = **0 (no limit)**, *Max trades per symbol* = **0 (no limit)**.
+- *Max hold time* = **0 (no limit)**, *Close positions when the session ends* = **false**. Positions stay open until SL, TP, the trailing stop, the AI manager, or the daily loss stop closes them.
+- Still active: the **3% total open-risk cap** (which in practice limits how many full-risk trades fit), the daily trade count, no averaging down, no hedging, and the **Friday close** (weekend gap protection; set *Friday close hour* = 0 to hold over weekends).
+
 ## Discretion mode (default)
 
 *AI trades on its own judgement* = **true**. The entry model receives:
