@@ -60,7 +60,7 @@ Three selectors at the top of the inputs control how the EA trades. Each one cha
 
 ### 1. Trading mode
 
-| Mode | Scan TF | Manage TF | SL distance | Min R:R | Max hold | Max spread | Trades/day | Timer | AI calls/day |
+| Mode | Decision TF | Manage TF | SL distance | Min R:R | Max hold | Max spread | Trades/day | Timer | AI calls/day |
 |---|---|---|---|---|---|---|---|---|---|
 | **Superscalping** | M1 | M1 | 0.5–1.5 ATR | 1.0 | 30 min | 0.30 ATR | 30 | 3 s | 1500 |
 | **Scalping** | M5 | M1 | 0.6–2.0 ATR | 1.2 | 3 h | 0.20 ATR | 15 | 5 s | 600 |
@@ -130,7 +130,6 @@ The chart dashboard shows the active mode, session (open or closed), profile and
 
 | Stage | AI decides | EA enforces (the AI cannot override these) |
 |---|---|---|
-| Scan | Which symbols have the best setups, the bias, a score, and a short market view | Symbols outside the watchlist are ignored; candidates below *Min scan score* or already holding a position are skipped |
 | Entry | Direction, confidence, **risk %**, SL, TP | Risk ≤ per-trade cap and ≤ remaining portfolio budget; confidence above the minimum; SL/TP on the correct side; SL 0.5–3 ATR from entry; R:R ≥ 1.5; spread ≤ 0.15 ATR; lot always rounded **down**; margin check |
 | Manage | Hold, close, partial close, move SL/TP | The SL can only **tighten**, never widen; TP and SL must clear the broker's stop level; both parts of a partial close must be ≥ the minimum lot; actions below *Min manage confidence* are ignored |
 | Close | Exits based on its own analysis | Daily loss limit (closes all, no new trades for the rest of the day), max hold time, Friday cutoff |
