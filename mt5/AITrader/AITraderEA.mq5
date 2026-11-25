@@ -53,6 +53,13 @@ int      g_vizSeq = 0;
 #define CLR_BAD          C'240,80,80'
 #define CLR_WARN         C'255,190,60'
 
+enum ENUM_SIGNAL_MODE
+  {
+   SIGNAL_EMA       = 0, // EMA crossover only (no AI - can be backtested)
+   SIGNAL_EMA_AI    = 1, // EMA crossover, AI may veto + manages exits
+   SIGNAL_AI        = 2  // AI discretion only
+  };
+
 enum ENUM_REVIEW_MODE
   {
    REVIEW_OFF    = 0, // Off - entry model decides alone
@@ -88,6 +95,14 @@ enum ENUM_RISK_PROFILE
   };
 
 //=== Inputs ==========================================================
+input group "SIGNAL ENGINE"
+input ENUM_SIGNAL_MODE  InpSignalMode     = SIGNAL_EMA;              // What opens trades
+input int               InpFastEMA        = 9;                       // Fast EMA
+input int               InpSlowEMA        = 21;                      // Slow EMA
+input int               InpEmaSwingBars   = 10;                      // Stop-loss beyond the swing of the last N bars
+input double            InpEmaTpRR        = 2.0;                     // Take-profit as a multiple of the stop distance
+input bool              InpEmaExitOnCross = true;                    // Close positions on the opposite crossover
+
 input group "STRATEGY PROFILE"
 input ENUM_TRADE_MODE   InpTradeMode      = MODE_INTRADAY;           // Trading mode
 input ENUM_SESSION_BIAS InpSession        = SESSION_NONE;            // Session bias
@@ -313,6 +328,7 @@ struct ClosedTrade
 
 //=== Globals =========================================================
 RuntimeConfig g_cfg;
+datetime      g_lastDash = 0;
 string        g_sizingText = "";
 int           g_sizingState = -1;   // -1 unknown, 0 cannot trade, 1 partial, 2 ok
 datetime      g_sizingAt = 0;
@@ -328,7 +344,7 @@ AIProvider g_prov[];
 string   g_lastProvider = "-";
 string   g_scanSkipped = "";
 string   g_syms[];
-int      g_hATR[], g_hRSI[], g_hE20[], g_hE50[], g_hE200[];
+int      g_hATR[], g_hRSI[], g_hE20[], g_hE50[], g_hE200[], g_hFast[], g_hSlow[];
 datetime g_lastScanBar = 0, g_lastManageBar = 0, g_day = 0;
 int      g_calls = 0;
 bool     g_haltedToday = false;
@@ -350,7 +366,7 @@ int OnInit()
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
    AddProvider(InpP3Enabled && InpP3Model != "", "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
-   if(ArraySize(g_prov) == 0)
+   if(ArraySize(g_prov) == 0 && InpSignalMode != SIGNAL_EMA)
      {
       Print("AITrader: no usable AI provider (enable one and give it a key or key file)");
       return INIT_PARAMETERS_INCORRECT;
@@ -363,13 +379,17 @@ int OnInit()
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetDeviationInPoints(InpSlippagePts);
 
-   if(MQLInfoInteger(MQL_TESTER))
-      Print("AITrader: WebRequest is unavailable in the Strategy Tester; the EA will idle there.");
+   if(MQLInfoInteger(MQL_TESTER) && InpSignalMode != SIGNAL_EMA)
+      Print("AITrader: WebRequest is unavailable in the Strategy Tester; use Signal mode = EMA crossover only to backtest.");
+   if(InpSignalMode != SIGNAL_AI && InpFastEMA >= InpSlowEMA)
+     { Print("AITrader: fast EMA must be shorter than slow EMA"); return INIT_PARAMETERS_INCORRECT; }
+   AddEmasToChart();
 
-   g_lastScanBar   = iTime(_Symbol, g_cfg.checkTF, 0); // first check on the next bar
+   g_lastScanBar   = iTime(_Symbol, InpSignalMode == SIGNAL_AI ? g_cfg.checkTF : g_cfg.scanTF, 0); // first check on the next bar
    g_lastManageBar = iTime(_Symbol, g_cfg.manageTF, 0);
    EventSetTimer(g_cfg.timerSec);
    SetupChartForVisuals();
+   PrintFormat("AITrader signal engine: %s", SignalModeName());
    PrintFormat("AITrader started: %s | %s session | %s | %d symbols | scan %s manage %s | risk %.2f%% | providers %s | dry run %s",
                ModeName(), SessionName(), ProfileName(), ArraySize(g_syms), TfName(g_cfg.scanTF), TfName(g_cfg.manageTF),
                g_cfg.riskPct, ProviderChain(), InpDryRun ? "ON" : "OFF");
@@ -384,6 +404,7 @@ void OnDeinit(const int reason)
      {
       IndicatorRelease(g_hATR[i]); IndicatorRelease(g_hRSI[i]);
       IndicatorRelease(g_hE20[i]); IndicatorRelease(g_hE50[i]); IndicatorRelease(g_hE200[i]);
+      IndicatorRelease(g_hFast[i]); IndicatorRelease(g_hSlow[i]);
      }
    ObjectsDeleteAll(0, PANEL_PREFIX);
    ObjectsDeleteAll(0, VIZ_PREFIX);
@@ -392,6 +413,7 @@ void OnDeinit(const int reason)
 
 void OnTick()
   {
+   if(MQLInfoInteger(MQL_TESTER)) { MainCycle(); return; }   // no timer-driven AI in the tester
    if(!AlgoTradingOn()) return;
    if(InpBreakevenR > 0) MechanicalBreakeven();
    if(InpTrailEnabled) TrailingStops();
@@ -403,6 +425,12 @@ void OnTick()
 void OnTimer()
   {
    if(MQLInfoInteger(MQL_TESTER)) return;
+   MainCycle();
+  }
+
+void MainCycle()
+  {
+   bool tester = MQLInfoInteger(MQL_TESTER) != 0;
    RollDay();
 
    // Algo Trading off (toolbar button, EA checkbox, or this copy was moved to the MQL5 VPS):
@@ -418,22 +446,28 @@ void OnTimer()
    EnforceHardRules();
    if(InpTrailEnabled) TrailingStops();
 
-   // 2. AI position management on each new manage bar
+   if(tester && InpBreakevenR > 0) MechanicalBreakeven();
+
+   // 2. AI position management on each new manage bar (not in EMA-only mode)
    datetime mBar = iTime(_Symbol, g_cfg.manageTF, 0);
-   if(mBar != 0 && mBar != g_lastManageBar)
+   if(InpSignalMode != SIGNAL_EMA && mBar != 0 && mBar != g_lastManageBar)
      {
       g_lastManageBar = mBar;
       ManagePositions();
      }
 
-   // 3. AI entry check on each new decision bar
-   datetime sBar = iTime(_Symbol, g_cfg.checkTF, 0);
-   if(sBar != 0 && sBar != g_lastScanBar)
+   // 3. Entries: EMA crossover on each new setup bar, or AI check on each new decision bar
+   if(InpSignalMode == SIGNAL_AI)
      {
-      g_lastScanBar = sBar;
-      ScanAndEnter();
+      datetime sBar = iTime(_Symbol, g_cfg.checkTF, 0);
+      if(sBar != 0 && sBar != g_lastScanBar) { g_lastScanBar = sBar; ScanAndEnter(); }
      }
-   UpdateDashboard();
+   else
+     {
+      datetime eBar = iTime(_Symbol, g_cfg.scanTF, 0);
+      if(eBar != 0 && eBar != g_lastScanBar) { g_lastScanBar = eBar; EmaSignals(); }
+     }
+   if(!tester || TimeCurrent() - g_lastDash >= 60) { g_lastDash = TimeCurrent(); UpdateDashboard(); }
   }
 
 //+------------------------------------------------------------------+
@@ -1706,12 +1740,15 @@ bool LoadSymbols()
       int k = ArraySize(g_syms);
       ArrayResize(g_syms, k + 1);   ArrayResize(g_hATR, k + 1); ArrayResize(g_hRSI, k + 1);
       ArrayResize(g_hE20, k + 1);   ArrayResize(g_hE50, k + 1); ArrayResize(g_hE200, k + 1);
+      ArrayResize(g_hFast, k + 1);  ArrayResize(g_hSlow, k + 1);
       g_syms[k]  = s;
       g_hATR[k]  = iATR(s, g_cfg.scanTF, 14);
       g_hRSI[k]  = iRSI(s, g_cfg.scanTF, 14, PRICE_CLOSE);
       g_hE20[k]  = iMA(s, g_cfg.scanTF, 20, 0, MODE_EMA, PRICE_CLOSE);
       g_hE50[k]  = iMA(s, g_cfg.scanTF, 50, 0, MODE_EMA, PRICE_CLOSE);
       g_hE200[k] = iMA(s, g_cfg.scanTF, 200, 0, MODE_EMA, PRICE_CLOSE);
+      g_hFast[k] = iMA(s, g_cfg.scanTF, InpFastEMA, 0, MODE_EMA, PRICE_CLOSE);
+      g_hSlow[k] = iMA(s, g_cfg.scanTF, InpSlowEMA, 0, MODE_EMA, PRICE_CLOSE);
       if(g_hATR[k] == INVALID_HANDLE || g_hRSI[k] == INVALID_HANDLE || g_hE20[k] == INVALID_HANDLE ||
          g_hE50[k] == INVALID_HANDLE || g_hE200[k] == INVALID_HANDLE)
         {
@@ -2020,6 +2057,7 @@ void UpdateDashboard()
    PanelAdd("AI TRADER EA", CLR_TITLE);
    PanelAdd(status, stClr);
    PanelAdd("", CLR_TEXT);
+   PanelAddWrapped("SIGNAL", SignalModeName(), CLR_TITLE);
    PanelAddWrapped("STRATEGY", StringFormat("%s | %s | %s", ModeName(), ProfileName(),
                    StringFormat("%s session %s", SessionName(), SessionWindowText())), CLR_TEXT);
    PanelAddWrapped("SESSION", InSession() ? "OPEN - entries allowed" : "CLOSED - no new entries",
@@ -3528,4 +3566,138 @@ string LowerTfContext(string sym)
    for(int i = MathMin(29, n - 1); i >= 0; i--)
       s += StringFormat(" [%s,%s,%s,%s]", Px(sym, r[i].open), Px(sym, r[i].high), Px(sym, r[i].low), Px(sym, r[i].close));
    return s + "\n";
+  }
+
+//+------------------------------------------------------------------+
+//| EMA CROSSOVER SIGNAL ENGINE                                       |
+//+------------------------------------------------------------------+
+string SignalModeName()
+  {
+   if(InpSignalMode == SIGNAL_EMA)    return StringFormat("EMA %d/%d crossover on %s (no AI)", InpFastEMA, InpSlowEMA, TfName(g_cfg.scanTF));
+   if(InpSignalMode == SIGNAL_EMA_AI) return StringFormat("EMA %d/%d crossover on %s + AI veto/management", InpFastEMA, InpSlowEMA, TfName(g_cfg.scanTF));
+   return "AI discretion";
+  }
+
+void InitDecision(EntryDecision &d)
+  {
+   d.action = ""; d.order = "MARKET"; d.entry = 0; d.expiryMin = 0; d.shadow = "";
+   d.thesis = ""; d.invalidation = ""; d.plan = "";
+   d.confidence = 0; d.risk_pct = 0; d.sl = 0; d.tp = 0; d.reason = "";
+  }
+
+// Show the two EMAs on the chart (display copies on the chart's own timeframe).
+void AddEmasToChart()
+  {
+   if(InpSignalMode == SIGNAL_AI || MQLInfoInteger(MQL_TESTER)) return;
+   int periods[2];
+   periods[0] = InpFastEMA; periods[1] = InpSlowEMA;
+   for(int k = 0; k < 2; k++)
+     {
+      bool present = false;                      // don't stack copies on every re-attach
+      for(int j = ChartIndicatorsTotal(0, 0) - 1; j >= 0; j--)
+         if(ChartIndicatorName(0, 0, j) == "MA(" + IntegerToString(periods[k]) + ")") present = true;
+      if(present) continue;
+      int h = iMA(_Symbol, _Period, periods[k], 0, MODE_EMA, PRICE_CLOSE);
+      if(h != INVALID_HANDLE) ChartIndicatorAdd(0, 0, h);
+     }
+  }
+
+void CloseDirection(string sym, bool buys, string why)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurs(t) || PositionGetString(POSITION_SYMBOL) != sym) continue;
+      if((PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) != buys) continue;
+      JournalEvent("MANAGE", (ulong)PositionGetInteger(POSITION_IDENTIFIER), sym, "CLOSE", why);
+      ClosePosition(t, why);
+     }
+  }
+
+// AI may only veto an EMA signal; if it is unavailable the trade goes ahead.
+bool AiVetoes(int idx, EntryDecision &d, string &why)
+  {
+   why = "";
+   string sym = g_syms[idx];
+   string system = StringFormat(
+      "An EMA %d/%d crossover on %s %s just signalled %s at about %s (stop-loss %s, take-profit %s). The trade is "
+      "placed automatically unless you VETO it. Veto only for a concrete, specific reason visible in the data (for "
+      "example high-impact news within minutes, entering straight into a major level, or an abnormal spike/spread). "
+      "Reply ONLY with JSON: {\"veto\":true|false,\"reason\":\"max 25 words\"}.",
+      InpFastEMA, InpSlowEMA, sym, TfName(g_cfg.scanTF), d.action,
+      Px(sym, d.action == "BUY" ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID)),
+      Px(sym, d.sl), Px(sym, d.tp));
+   string content, used;
+   if(!CallAI(InpChainEntry, InpModelEntry, system, SymbolContext(idx), content, used, "")) return false;
+   string o = ExtractJsonObject(content);
+   int p = JsonValueStart(o, "veto");
+   bool veto = p >= 0 && StringSubstr(o, p, 4) == "true";
+   why = used + ": " + JsonGetString(o, "reason");
+   return veto;
+  }
+
+void EmaSignals()
+  {
+   for(int i = 0; i < ArraySize(g_syms); i++)
+     {
+      string sym = g_syms[i];
+      double f[], sl[];
+      if(CopyBuffer(g_hFast[i], 0, 1, 2, f) != 2 || CopyBuffer(g_hSlow[i], 0, 1, 2, sl) != 2) continue;
+      // f[0], sl[0] = bar 2 (older); f[1], sl[1] = bar 1 (last closed)
+      bool up = f[0] <= sl[0] && f[1] > sl[1];
+      bool dn = f[0] >= sl[0] && f[1] < sl[1];
+      if(!up && !dn) continue;
+      bool isBuy = up;
+      string sig = StringFormat("EMA %d/%d cross %s on %s (fast %s, slow %s)", InpFastEMA, InpSlowEMA, isBuy ? "UP" : "DOWN",
+                                TfName(g_cfg.scanTF), Px(sym, f[1]), Px(sym, sl[1]));
+      Notify(sym + " " + sig);
+
+      if(InpEmaExitOnCross) CloseDirection(sym, !isBuy, "opposite " + sig);
+
+      string why = "";
+      if(!EntryAllowed(why)) { Notify(sym + " signal skipped: " + why); continue; }
+      if(ScanRow(i) == "")    { Notify(sym + " signal skipped: spread too wide, market closed or no data"); continue; }
+
+      double atr = Buf(g_hATR[i]);
+      if(atr <= 0) continue;
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      int n = CopyRates(sym, g_cfg.scanTF, 1, MathMax(3, InpEmaSwingBars), r);
+      if(n <= 0) continue;
+      double swing = isBuy ? r[0].low : r[0].high;
+      for(int k = 1; k < n; k++) swing = isBuy ? MathMin(swing, r[k].low) : MathMax(swing, r[k].high);
+      double entry = isBuy ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
+      double dist = (isBuy ? entry - swing : swing - entry) + 0.1 * atr;   // beyond the swing, with a small buffer
+      dist = MathMax(dist, g_cfg.slMin * atr * 1.02);
+      dist = MathMin(dist, g_cfg.slMax * atr * 0.98);
+      double rr = MathMax(InpEmaTpRR, g_cfg.minRR + 0.01);
+
+      EntryDecision d;
+      InitDecision(d);
+      d.action     = isBuy ? "BUY" : "SELL";
+      d.confidence = 1.0;
+      d.risk_pct   = g_cfg.riskPct;
+      d.sl         = isBuy ? entry - dist : entry + dist;
+      d.tp         = isBuy ? entry + rr * dist : entry - rr * dist;
+      d.reason     = sig;
+      d.thesis     = sig + StringFormat("; stop beyond the %d-bar swing %s, target %.1fR", InpEmaSwingBars, Px(sym, swing), rr);
+      d.invalidation = "stop-loss, or the opposite EMA crossover";
+      d.plan       = (InpEmaExitOnCross ? "exit on the opposite crossover, " : "") + "trailing stop, or take-profit";
+
+      if(InpSignalMode == SIGNAL_EMA_AI)
+        {
+         string vwhy;
+         if(AiVetoes(i, d, vwhy))
+           {
+            Notify(sym + " " + d.action + " vetoed by AI: " + vwhy);
+            LogRow("ENTRY", sym, d.action, 1.0, 0, d.sl, d.tp, 0, "REJECTED: AI veto", sig + " | " + vwhy);
+            continue;
+           }
+         if(vwhy != "") d.reason = sig + " | AI no veto - " + vwhy;
+        }
+
+      double remaining = MathMin(g_cfg.riskPct, InpMaxTotalRiskPct - OpenRiskPct());
+      if(InpAccountRiskPct > 0) remaining = MathMin(remaining, InpAccountRiskPct - AccountRiskPct());
+      ExecuteEntry(i, d, MathMax(0.0, remaining));
+     }
   }

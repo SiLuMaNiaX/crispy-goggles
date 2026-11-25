@@ -275,6 +275,18 @@ These are drawn on the chart the EA is attached to, using the same data the AI r
 
 Each layer can be switched off under *Chart visuals*. All objects are removed when the EA is removed.
 
+## Signal engine (what opens trades)
+
+| *Signal mode* | Entries | Exits | Backtestable |
+|---|---|---|---|
+| **EMA crossover only** (default) | Fast EMA (9) crosses slow EMA (21) on the closed setup-timeframe bar (M5 in Scalping) → market order | SL beyond the last N-bar swing (clamped to the mode's ATR range), TP = 2R, **close on the opposite cross**, trailing stop | **Yes**, in the Strategy Tester (no AI calls) |
+| EMA + AI veto | Same cross; asAi can veto with a concrete reason (if it is down, the trade still goes ahead) | As above, plus asAi manages using the recorded plan | No (needs WebRequest) |
+| AI discretion | asAi decides everything | asAi + trailing stop | No |
+
+All risk rules still apply: sizing, the per-trade / EA / account / per-side caps, news and spread filters, no hedging, trailing stop, Friday close. The EMAs are added to the chart automatically.
+
+**Backtest:** Strategy Tester → AITraderEA → XAUUSDc, M5, "Every tick based on real ticks", Signal mode = *EMA crossover only*, Dry run = false. Note that the economic calendar isn't available in the tester, so the news filter is off there.
+
 ## API keys: where to put them
 
 | Where | Works on | Shown in logs? |
