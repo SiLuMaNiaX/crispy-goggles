@@ -170,7 +170,8 @@ input double           InpAccountRiskPct  = 4.0;                     // A. Accou
 input double           InpSideRiskPct     = 2.0;                     // B. Max total risk on one direction of the same asset, e.g. all gold SELLs (%)
 input bool             InpStructureFilter = false;                   // Block trades against the decision-timeframe swing structure
 input int              InpMaxTradesDay    = 6;                       // [Custom] Max new trades per day
-input double           InpMaxDailyLossPct = 3.0;                     // Daily equity drawdown limit (%)
+input double           InpMaxDailyLossPct = 0.0;                     // Daily loss limit that halts the EA for the day (%; 0 = never halt)
+input int              InpDailyTradeLimit = 0;                       // Max new trades per day (0 = no limit, -1 = mode default)
 input bool             InpCloseOnDailyLoss= true;                    // Close all positions when daily limit hit
 input double           InpMaxSpreadAtr    = 0.15;                    // [Custom] Max spread as fraction of ATR
 
@@ -336,6 +337,7 @@ int OnInit()
    ArrayResize(g_prov, 0);
    ArrayResize(g_syms, 0);
    g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
+   g_haltedToday = false;
    JournalLoad();
    g_newsLoaded = 0; g_tradesDirty = true; ArrayResize(g_news, 0); ArrayResize(g_trades, 0);
    g_vizLast = 0; ArrayResize(g_vizMarkers, 0);
@@ -509,6 +511,7 @@ bool BuildConfig()
    g_cfg.riskPct      = MathMin(InpMaxRiskPct * riskMult, InpRiskCeilingPct);
    g_cfg.riskPct      = MathMin(g_cfg.riskPct, InpMaxTotalRiskPct);
    g_cfg.maxTradesDay = (int)MathMax(1, MathRound(g_cfg.maxTradesDay * tradesMult));
+   if(InpDailyTradeLimit >= 0) g_cfg.maxTradesDay = InpDailyTradeLimit;   // 0 = no limit
 
    //--- session bias (windows are computed live in SessionWindow, DST-aware) ---
    switch(InpSession)
@@ -677,7 +680,7 @@ void EnforceHardRules()
   {
    double dayEq = DayStartEquity(), eq = AccountInfoDouble(ACCOUNT_EQUITY);
    double ddPct = dayEq > 0 ? (dayEq - eq) / dayEq * 100.0 : 0.0;
-   if(ddPct >= InpMaxDailyLossPct && !g_haltedToday)
+   if(InpMaxDailyLossPct > 0 && ddPct >= InpMaxDailyLossPct && !g_haltedToday)
      {
       g_haltedToday = true;
       Notify(StringFormat("DAILY LOSS LIMIT %.2f%% hit - entries halted", ddPct));
@@ -754,7 +757,7 @@ bool EntryAllowed(string &why)
    if(IsFridayClose())                                { why = "Friday close window"; return false; }
    if(!InSession())                                   { why = "outside " + SessionName() + " session"; return false; }
    if(g_cfg.maxPositions > 0 && CountPositions() + CountPendings() >= g_cfg.maxPositions) { why = "max positions (incl. pending orders)"; return false; }
-   if(CountTodayEntries() >= g_cfg.maxTradesDay)         { why = "max trades today"; return false; }
+   if(g_cfg.maxTradesDay > 0 && CountTodayEntries() >= g_cfg.maxTradesDay) { why = "max trades today"; return false; }
    if(OpenRiskPct() >= InpMaxTotalRiskPct - 0.01)     { why = "total open risk cap"; return false; }
    if(InpAccountRiskPct > 0 && AccountRiskPct() >= InpAccountRiskPct - 0.01)
      { why = StringFormat("account-wide risk cap (%.2f%% of %.2f%%)", AccountRiskPct(), InpAccountRiskPct); return false; }
@@ -2012,16 +2015,17 @@ void UpdateDashboard()
                    g_calls, g_cfg.maxCalls), g_calls >= g_cfg.maxCalls ? CLR_BAD : CLR_TEXT);
    PanelAddWrapped("TIMEFRAMES", StringFormat("scan %s, manage %s | %d symbols", TfName(g_cfg.scanTF),
                    TfName(g_cfg.manageTF), ArraySize(g_syms)), CLR_TEXT);
-   PanelAddWrapped("LIMITS", StringFormat("risk/trade %.2f%% | min conf %.2f | min R:R %.1f | daily loss %.1f%%",
-                   g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR, InpMaxDailyLossPct), CLR_TEXT);
+   PanelAddWrapped("LIMITS", StringFormat("risk/trade %.2f%% | min conf %.2f | min R:R %.1f | daily loss halt %s",
+                   g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR,
+                   InpMaxDailyLossPct > 0 ? StringFormat("%.1f%%", InpMaxDailyLossPct) : "off"), CLR_TEXT);
    PanelAddWrapped("DAY P/L", StringFormat("%+.2f%%", dayPct), dayPct > 0 ? CLR_GOOD : (dayPct < 0 ? CLR_BAD : CLR_TEXT));
    double openRisk = OpenRiskPct();
    if(g_sizingText != "")
       PanelAddWrapped("SIZING", g_sizingText, g_sizingState == 2 ? CLR_GOOD : (g_sizingState == 1 ? CLR_WARN : CLR_BAD));
-   PanelAddWrapped("EXPOSURE", StringFormat("open risk %.2f%% / %.2f%% | positions %d/%s | trades today %d/%d",
+   PanelAddWrapped("EXPOSURE", StringFormat("open risk %.2f%% / %.2f%% | positions %d/%s | trades today %d/%s",
                    openRisk, InpMaxTotalRiskPct, CountPositions(),
                    g_cfg.maxPositions > 0 ? IntegerToString(g_cfg.maxPositions) : "no limit",
-                   CountTodayEntries(), g_cfg.maxTradesDay),
+                   CountTodayEntries(), g_cfg.maxTradesDay > 0 ? IntegerToString(g_cfg.maxTradesDay) : "no limit"),
                    openRisk >= InpMaxTotalRiskPct - 0.01 ? CLR_WARN : CLR_TEXT);
    if(InpAccountRiskPct > 0 || InpSideRiskPct > 0)
      {
