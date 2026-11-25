@@ -53,11 +53,11 @@ int      g_vizSeq = 0;
 #define CLR_BAD          C'240,80,80'
 #define CLR_WARN         C'255,190,60'
 
-enum ENUM_AI_ROUTE
+enum ENUM_REVIEW_MODE
   {
-   ROUTE_PRIMARY    = 0, // Primary (asAi) first
-   ROUTE_DEEPSEEK   = 1, // DeepSeek first
-   ROUTE_OPENROUTER = 2  // OpenRouter first
+   REVIEW_OFF    = 0, // Off - entry model decides alone
+   REVIEW_SHADOW = 1, // Shadow - 2nd model's verdict is logged, never blocks
+   REVIEW_VETO   = 2  // Veto - 2nd model must agree
   };
 
 enum ENUM_TRADE_MODE
@@ -94,7 +94,7 @@ input ENUM_SESSION_BIAS InpSession        = SESSION_NONE;            // Session 
 input ENUM_RISK_PROFILE InpRiskProfile    = PROFILE_CONSERVATIVE;    // Risk profile
 input bool              InpCloseAtSessionEnd = true;                 // Non-swing modes: close positions when the session ends
 
-// Providers are tried in order: Primary (asAi) -> Backup 1 (DeepSeek) -> Backup 2 (OpenRouter).
+// Each job (entry, scan, manage, review) has its own ordered provider list; the next one is tried when one fails.
 // A provider that fails is skipped for InpFailoverCooldownMin minutes.
 input group "AI provider 1 - PRIMARY (asAi, OpenAI-compatible)"
 input bool             InpP1Enabled       = true;                    // Enabled
@@ -107,25 +107,25 @@ input string           InpModelScan       = "";                      // Primary 
 input string           InpModelEntry      = "";                      // Primary model for ENTRY (empty = Model id)
 input string           InpModelManage     = "";                      // Primary model for MANAGE (empty = Model id)
 
-input group "AI provider 2 - BACKUP (DeepSeek)"
+input group "AI provider 2 - DeepSeek (shadow reviewer, backup, manager)"
 input bool             InpP2Enabled       = true;                    // Enabled
 input string           InpP2Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP2KeyFile       = "aitrader_key_deepseek.txt"; // Key file in <Common>\Files
 input string           InpP2Model         = "deepseek-chat";         // Model
 
-input group "AI provider 3 - BACKUP (OpenRouter)"
+input group "AI provider 3 - OpenRouter (cheap scanner + scanner backup)"
 input bool             InpP3Enabled       = true;                    // Enabled
 input string           InpP3Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP3KeyFile       = "aitrader_key_openrouter.txt"; // Key file in <Common>\Files
-input string           InpP3Model         = "google/gemini-4-carbon"; // Model slug
+input string           InpP3Model         = "";                      // Scanner model slug ("OpenRouter"; empty = off)
+input string           InpP4Model         = "";                      // Scanner backup model slug ("OpenRouter-B"; empty = off)
 
-input group "Multi-model routing"
-input ENUM_AI_ROUTE    InpRouteScan       = ROUTE_DEEPSEEK;          // SCAN runs on (others = failover)
-input ENUM_AI_ROUTE    InpRouteEntry      = ROUTE_PRIMARY;           // ENTRY runs on (others = failover)
-input ENUM_AI_ROUTE    InpRouteManage     = ROUTE_DEEPSEEK;          // MANAGE runs on (others = failover)
-input ENUM_AI_ROUTE    InpRouteReview     = ROUTE_OPENROUTER;        // ENTRY 2nd opinion runs on (must differ from 1st)
-input bool             InpEntryConsensus  = true;                    // [Balanced/Aggressive] ENTRY needs a 2nd model to agree
-input bool             InpConsensusStrict = false;                   // If no 2nd provider is available: true = skip trade
+input group "Who does what (provider names, tried in order)"
+input string           InpChainEntry      = "asAi,DeepSeek";         // ENTRY decision (trades)
+input string           InpChainScan       = "OpenRouter,OpenRouter-B,DeepSeek"; // SCAN (only with 3+ tradeable symbols)
+input string           InpChainManage     = "DeepSeek,asAi";         // MANAGE open positions
+input ENUM_REVIEW_MODE InpReviewMode      = REVIEW_SHADOW;           // 2nd-opinion mode
+input string           InpChainReview     = "DeepSeek,OpenRouter";   // 2nd-opinion reviewer (never the entry provider)
 
 input group "AI request settings"
 input int              InpFailoverCooldownMin = 10;                  // Skip a failed provider for N minutes
@@ -217,6 +217,7 @@ struct EntryDecision
    string            order;      // MARKET / LIMIT / STOP
    double            entry;      // pending entry price
    int               expiryMin;  // pending lifetime
+   string            shadow;     // reviewer verdict: A agree, D disagree, N n/a, "" not reviewed
    double            confidence;
    double            risk_pct;
    double            sl;
@@ -265,8 +266,6 @@ struct RuntimeConfig
    double            minManageConf;
    double            minScanScore;
    int               pendingExpiryMin;
-   bool              consensus;
-   bool              consensusStrict;
    bool              fridayClose;
    string            styleText;
    string            profileText;
@@ -295,6 +294,7 @@ struct ClosedTrade
    double            sl;
    double            rMult;
    string            exitReason;
+   string            shadow;      // A / D / N / "" from the entry comment
   };
 
 //=== Globals =========================================================
@@ -329,7 +329,8 @@ int OnInit()
    g_vizLast = 0; ArrayResize(g_vizMarkers, 0);
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
-   AddProvider(InpP3Enabled, "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
+   AddProvider(InpP3Enabled && InpP3Model != "", "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
+   AddProvider(InpP3Enabled && InpP4Model != "", "OpenRouter-B", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP4Model, true);
    if(ArraySize(g_prov) == 0)
      {
       Print("AITrader: no usable AI provider (enable one and give it a key or key file)");
@@ -465,8 +466,6 @@ bool BuildConfig()
    g_cfg.maxPositions    = InpMaxPositions;
    g_cfg.maxCandidates   = InpMaxCandidates;
    g_cfg.minScanScore    = InpMinScanScore;
-   g_cfg.consensus       = InpEntryConsensus;
-   g_cfg.consensusStrict = InpConsensusStrict;
    switch(InpRiskProfile)
      {
       case PROFILE_CONSERVATIVE:
@@ -475,7 +474,6 @@ bool BuildConfig()
          g_cfg.minManageConf = MathMax(g_cfg.minManageConf, 0.70);
          g_cfg.maxPositions = (int)MathMin(g_cfg.maxPositions, 2);
          g_cfg.minScanScore = MathMax(g_cfg.minScanScore, 0.70);
-         g_cfg.consensus = true;
          g_cfg.profileText = "CONSERVATIVE: capital preservation first. Only trend-aligned, high-probability setups; "
                              "lower risk when uncertain; take partial profits and move SL to breakeven early.";
          break;
@@ -749,7 +747,7 @@ void ScanAndEnter()
 
    string content;
    string used;
-   if(!CallAI(InpRouteScan, InpModelScan, system, user, content, used, "")) { g_lastScan = "AI call failed"; return; }
+   if(!CallAI(InpChainScan, InpModelScan, system, user, content, used, "")) { g_lastScan = "AI call failed"; return; }
 
    string obj = ExtractJsonObject(content);
    string cands[];
@@ -858,41 +856,46 @@ void EvaluateEntry(int idx, string bias, double score, string note)
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
    string content, used;
-   if(!CallAI(InpRouteEntry, InpModelEntry, system, user, content, used, "")) return;
+   if(!CallAI(InpChainEntry, InpModelEntry, system, user, content, used, "")) return;
 
    EntryDecision d;
    if(!ParseEntry(content, d))
      { LogRow("ENTRY", sym, "PARSE_ERROR", 0, 0, 0, 0, 0, used, StringSubstr(content, 0, 200)); return; }
    d.reason = used + ": " + d.reason;
 
-   // Second opinion from a DIFFERENT provider before any trade
-   if(g_cfg.consensus && (d.action == "BUY" || d.action == "SELL") && d.confidence >= g_cfg.minConf)
+   // Second opinion from a DIFFERENT provider: shadow (logged only) or veto
+   if(InpReviewMode != REVIEW_OFF && (d.action == "BUY" || d.action == "SELL") && d.confidence >= g_cfg.minConf)
      {
       string system2 = system + " You are the independent second reviewer: judge the data yourself; do not assume "
-                       "the scanner is right. Reject marginal setups.";
+                       "the first model is right. Reject marginal setups.";
       string content2, used2;
-      if(!CallAI(InpRouteReview, "", system2, user, content2, used2, used))
+      if(!CallAI(InpChainReview, "", system2, user, content2, used2, used))
         {
-         if(g_cfg.consensusStrict)
-           { LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: no 2nd model available", d.reason); return; }
-         Notify(sym + ": no 2nd model available, using single-model decision");
+         d.shadow = "N";
+         Notify(sym + ": reviewer unavailable - entry model decides alone");
         }
       else
         {
          EntryDecision d2;
-         if(!ParseEntry(content2, d2) || d2.action != d.action)
+         bool parsed = ParseEntry(content2, d2);
+         bool agrees = parsed && d2.action == d.action;
+         string verdict = StringFormat("%s %s (%s, conf %.2f)", used2, agrees ? "AGREES" : "DISAGREES",
+                                       parsed ? d2.action : "unparseable", d2.confidence);
+         if(InpReviewMode == REVIEW_VETO && !agrees)
            {
-            string why = StringFormat("no consensus: %s says %s, %s says %s", used, d.action, used2,
-                                      d2.action == "" ? "unparseable" : d2.action);
-            Notify(sym + " " + why);
-            LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: " + why,
+            Notify(sym + " vetoed: " + verdict);
+            LogRow("ENTRY", sym, d.action, d.confidence, d.risk_pct, d.sl, d.tp, 0, "REJECTED: veto - " + verdict,
                    d.reason + " | " + used2 + ": " + d2.reason);
             return;
            }
-         // Agreement: be as cautious as the more cautious model
-         d.confidence = MathMin(d.confidence, d2.confidence);
-         d.risk_pct   = MathMin(d.risk_pct, d2.risk_pct);
-         d.reason     = d.reason + " | " + used2 + " agrees: " + d2.reason;
+         if(InpReviewMode == REVIEW_VETO)
+           {
+            d.confidence = MathMin(d.confidence, d2.confidence);
+            d.risk_pct   = MathMin(d.risk_pct, d2.risk_pct);
+           }
+         d.shadow = agrees ? "A" : "D";
+         Notify(StringFormat("%s %s: review %s", sym, d.action, verdict));
+         d.reason = d.reason + " | review " + verdict + ": " + d2.reason;
         }
      }
    ExecuteEntry(idx, d, remaining);
@@ -963,7 +966,8 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
      }
 
    g_trade.SetTypeFillingBySymbol(sym);
-   string cmt = StringFormat("AI c%.0f r%.2f x%d", d.confidence * 100, riskPct, expiryMin);
+   string cmt = StringFormat("AI c%.0f r%.2f x%d%s", d.confidence * 100, riskPct, expiryMin,
+                             d.shadow == "" ? "" : " s" + d.shadow);   // s = shadow review verdict
    bool ok;
    if(ord == "MARKET")
       ok = isBuy ? g_trade.Buy(lots, sym, ask, sl, tp, cmt) : g_trade.Sell(lots, sym, bid, sl, tp, cmt);
@@ -1041,7 +1045,7 @@ void ManageOne(ulong ticket)
 
    string content;
    string used;
-   if(!CallAI(InpRouteManage, InpModelManage, system, user, content, used, "")) return;
+   if(!CallAI(InpChainManage, InpModelManage, system, user, content, used, "")) return;
 
    ManageDecision m;
    if(!ParseManage(content, m))
@@ -1301,17 +1305,9 @@ string HostOf(string url)
    return q > 0 ? StringSubstr(url, 0, q) : url;
   }
 
-string RouteName(ENUM_AI_ROUTE r)
-  {
-   if(r == ROUTE_DEEPSEEK)   return "DeepSeek";
-   if(r == ROUTE_OPENROUTER) return "OpenRouter";
-   return InpP1Name;
-  }
-
-// Try the routed provider first, then the others in chain order, skipping 'exclude'.
+// Tries the providers named in 'chain' (comma separated, in order), skipping 'exclude'.
 // The per-stage model override applies only when the primary (asAi) answers.
-// 'used' receives the name of the provider that answered.
-bool CallAI(ENUM_AI_ROUTE route, string stageModel, string system, string user, string &content,
+bool CallAI(string chain, string stageModel, string system, string user, string &content,
             string &used, string exclude)
   {
    content = ""; used = "";
@@ -1319,10 +1315,24 @@ bool CallAI(ENUM_AI_ROUTE route, string stageModel, string system, string user, 
    int n = ArraySize(g_prov);
    int order[];
    ArrayResize(order, 0);
-   string first = RouteName(route);
-   for(int i = 0; i < n; i++) if(g_prov[i].name == first) { ArrayResize(order, 1); order[0] = i; }
-   for(int i = 0; i < n; i++)
-      if(g_prov[i].name != first) { int k = ArraySize(order); ArrayResize(order, k + 1); order[k] = i; }
+   string names[];
+   int nn = StringSplit(chain, ',', names);
+   for(int c = 0; c < nn; c++)
+     {
+      string want = names[c];
+      StringTrimLeft(want); StringTrimRight(want); StringToLower(want);
+      for(int i = 0; i < n; i++)
+        {
+         string have = g_prov[i].name;
+         StringToLower(have);
+         if(have != want) continue;
+         bool dup = false;
+         for(int k = 0; k < ArraySize(order); k++) if(order[k] == i) dup = true;
+         if(!dup) { int k = ArraySize(order); ArrayResize(order, k + 1); order[k] = i; }
+        }
+     }
+   if(ArraySize(order) == 0) // nothing in the chain is configured: fall back to every provider
+     { ArrayResize(order, n); for(int i = 0; i < n; i++) order[i] = i; }
 
    bool anyUp = false; // if every candidate is cooling down, try them all rather than go blind
    for(int k = 0; k < ArraySize(order); k++)
@@ -1397,7 +1407,7 @@ bool CallProvider(AIProvider &p, string model, string system, string user, strin
 
 bool ParseEntry(string content, EntryDecision &d)
   {
-   d.action = ""; d.order = "MARKET"; d.entry = 0; d.expiryMin = 0;
+   d.action = ""; d.order = "MARKET"; d.entry = 0; d.expiryMin = 0; d.shadow = "";
    d.confidence = 0; d.risk_pct = 0; d.sl = 0; d.tp = 0; d.reason = "";
    string o = ExtractJsonObject(content);
    if(o == "") return false;
@@ -1996,6 +2006,8 @@ void UpdateDashboard()
                       snet > 0 ? CLR_GOOD : (snet < 0 ? CLR_BAD : CLR_TEXT));
       PanelAddWrapped("", StringFormat("max DD %.2f %s (%.1f%%) | avg %+.2fR", sdd, cur, sddp, sR), CLR_TEXT);
      }
+   if(InpReviewMode == REVIEW_SHADOW && sn > 0)
+      PanelAddWrapped("SHADOW", ShadowSplitText(), CLR_HEAD);
    bool proven = sn >= 30 && snet > 0 && spf > 1.2;
    PanelAddWrapped("PROOF", proven ? "criteria met: 30+ trades, net > 0, PF > 1.2"
                    : StringFormat("%d/30 trades | needs net > 0 and PF > 1.2", sn), proven ? CLR_GOOD : CLR_WARN);
@@ -2227,7 +2239,7 @@ void LoadTrades()
      {
       ClosedTrade c;
       c.posId = ids[k]; c.sym = ""; c.dir = 0; c.openTime = 0; c.closeTime = 0;
-      c.openPrice = 0; c.closePrice = 0; c.volume = 0; c.net = 0; c.sl = 0; c.rMult = 0; c.exitReason = "";
+      c.openPrice = 0; c.closePrice = 0; c.volume = 0; c.net = 0; c.sl = 0; c.rMult = 0; c.exitReason = ""; c.shadow = "";
       double inVol = 0, outVol = 0, outValue = 0;
       ulong entryOrder = 0;
       for(int i = 0; i < total; i++)
@@ -2247,6 +2259,9 @@ void LoadTrades()
                c.sym        = HistoryDealGetString(t, DEAL_SYMBOL);
                c.dir        = HistoryDealGetInteger(t, DEAL_TYPE) == DEAL_TYPE_BUY ? 1 : -1;
                entryOrder   = (ulong)HistoryDealGetInteger(t, DEAL_ORDER);
+               string cm    = HistoryDealGetString(t, DEAL_COMMENT);
+               int sp       = StringFind(cm, " s");
+               if(sp >= 0) c.shadow = StringSubstr(cm, sp + 2, 1);
               }
             inVol += v;
            }
@@ -2811,4 +2826,20 @@ void SetupChartForVisuals()
       ChartSetDouble(0, CHART_SHIFT_SIZE, 25);
      }
    ChartSetInteger(0, CHART_SHOW_TRADE_LEVELS, true); // SL/TP lines of open positions
+  }
+
+// Results split by the shadow reviewer's verdict: does its opinion predict outcomes?
+string ShadowSplitText()
+  {
+   int na = 0, nd = 0; double neta = 0, netd = 0, gpa = 0, gla = 0, gpd = 0, gld = 0;
+   for(int i = 0; i < ArraySize(g_trades); i++)
+     {
+      double x = g_trades[i].net;
+      if(g_trades[i].shadow == "A") { na++; neta += x; if(x > 0) gpa += x; else gla -= x; }
+      if(g_trades[i].shadow == "D") { nd++; netd += x; if(x > 0) gpd += x; else gld -= x; }
+     }
+   if(na + nd == 0) return "no reviewed trades yet";
+   return StringFormat("agreed %d (net %+.2f, PF %.2f) | disagreed %d (net %+.2f, PF %.2f)",
+                       na, neta, gla > 0 ? gpa / gla : (gpa > 0 ? 99.0 : 0.0),
+                       nd, netd, gld > 0 ? gpd / gld : (gpd > 0 ? 99.0 : 0.0));
   }

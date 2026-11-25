@@ -141,6 +141,19 @@ The portfolio limits are max positions, max trades per day, max total open risk 
 
 The default watchlist is `XAUUSD`. When **2 or fewer** symbols pass the spread filter (*Skip the AI scanner when this many or fewer symbols are tradeable*), the EA skips the scan stage. On every scan bar, the entry model (asAi) judges each tradeable symbol in either direction, and the second-opinion model (Gemini) must agree before any trade. Set that input to 0 to always use the scanner.
 
+## Who does what
+
+Each job has its own ordered list of providers. If the first one fails, the EA tries the next.
+
+| Job | Default list | Notes |
+|---|---|---|
+| **Entry** (opens trades) | `asAi,DeepSeek` | A single model decides. DeepSeek takes over if asAi is down. |
+| **Second opinion** | `DeepSeek,OpenRouter`, mode **SHADOW** | The reviewer never blocks a trade in shadow mode. Its verdict (AGREES / DISAGREES) is logged and stored in the order comment (`sA` / `sD`). The panel's **SHADOW** line compares results of agreed vs. disagreed trades. Use **VETO** to require agreement, **OFF** to skip it. |
+| **Scan** (3+ tradeable symbols only) | `OpenRouter,OpenRouter-B,DeepSeek` | `OpenRouter` = *Scanner model slug* (a cheap model), `OpenRouter-B` = *Scanner backup model slug*. Both use the OpenRouter key. Leave a slug empty to disable it. In gold-only direct mode the scanner isn't used. |
+| **Manage** open positions | `DeepSeek,asAi` | Runs every manage bar while a trade is open. You can put the cheap OpenRouter model first. |
+
+The provider names are `asAi`, `DeepSeek`, `OpenRouter` and `OpenRouter-B`.
+
 ## Pending orders (LIMIT / STOP)
 
 The entry model can choose how to enter:
