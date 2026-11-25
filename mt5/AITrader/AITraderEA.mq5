@@ -194,6 +194,8 @@ input int              InpNewsMinImportance = 3;                     //    Min i
 input int              InpNewsBeforeMin   = 30;                      //    Block entries N min before an event
 input int              InpNewsAfterMin    = 15;                      //    ...and N min after
 input bool             InpNewsClosePositions = false;                //    Also close open positions in the news window
+input bool             InpNewsGoldOnly    = true;                    //    Only events that move gold (keyword list below)
+input string           InpNewsGoldKeywords= "CPI,Consumer Price,PCE,Nonfarm,Non-Farm,Payrolls,Unemployment Rate,Jobless Claims,JOLTS,ADP,Average Hourly Earnings,FOMC,Fed ,Federal Reserve,Interest Rate Decision,Powell,GDP,PPI,Producer Price,Retail Sales,ISM,Michigan"; //    Gold-moving event keywords
 input bool             InpKeyLevels       = true;                    // 3. Key levels (prev day/week, Asian range, session opens, round numbers)
 input bool             InpHTFContext      = true;                    // 4. Higher-timeframe trend & structure
 input bool             InpVolumeProfile   = true;                    // 5. Volume profile POC / value area (tick volume)
@@ -2185,7 +2187,12 @@ void LoadNews()
          MqlCalendarEvent ev;
          if(!CalendarEventById(vals[i].event_id, ev)) continue;
          int imp = (int)ev.importance; // 0 none, 1 low, 2 moderate, 3 high
-         if(imp < InpNewsMinImportance) continue;
+         if(InpNewsGoldOnly)
+           {
+            // gold-moving events by name; moderate ones count too (e.g. Jobless Claims), the rest is ignored
+            if(imp < MathMin(InpNewsMinImportance, 2) || !GoldRelevant(ev.name)) continue;
+           }
+         else if(imp < InpNewsMinImportance) continue;
          int k = ArraySize(g_news);
          ArrayResize(g_news, k + 1);
          g_news[k].t = vals[i].time; g_news[k].name = ev.name; g_news[k].cur = cur; g_news[k].imp = imp;
@@ -3418,4 +3425,22 @@ string PerMagicName(string name)
    int dot = -1;
    for(int i = StringLen(name) - 1; i >= 0; i--) if(StringGetCharacter(name, i) == '.') { dot = i; break; }
    return dot < 0 ? name + tag : StringSubstr(name, 0, dot) + tag + StringSubstr(name, dot);
+  }
+
+// True if the event name contains one of InpNewsGoldKeywords (case-insensitive).
+bool GoldRelevant(string name)
+  {
+   string n = name;
+   StringToLower(n);
+   string keys[];
+   int k = StringSplit(InpNewsGoldKeywords, ',', keys);
+   for(int i = 0; i < k; i++)
+     {
+      string key = keys[i];
+      StringTrimLeft(key);
+      if(key == "") continue;
+      StringToLower(key);
+      if(StringFind(n, key) >= 0) return true;
+     }
+   return false;
   }
