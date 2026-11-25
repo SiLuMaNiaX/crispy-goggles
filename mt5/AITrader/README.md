@@ -152,6 +152,16 @@ Each job has its own ordered list of providers. If the first one fails, the EA t
 
 The provider names are `asAi`, `DeepSeek` and `OpenRouter`. OpenRouter is an optional extra backup: set its *Model slug* to use it. **There is no scanner:** on every decision bar, each tradeable symbol in the watchlist goes straight to the entry model.
 
+## Several trades on the same symbol
+
+| Input | Default | Rule |
+|---|---|---|
+| *Max trades per symbol* | 3 | Open positions plus pending orders on one symbol. Entry checks continue while below this limit. |
+| *No averaging down* | on | A new trade in the same direction is allowed only if the existing same-direction trades are **in profit**. |
+| *Allow opposite trade* | off | No long and short on the same symbol at once (that mostly pays the spread twice). |
+
+The profile's *Max positions*, the **3% total open risk** cap (which includes pending orders), trades per day, and the daily loss limit all still apply. The entry model sees the existing trades and is told that a new trade must be a separate setup.
+
 ## Trailing stop
 
 This is a mechanical rule that runs in the code on every tick, not through the AI:

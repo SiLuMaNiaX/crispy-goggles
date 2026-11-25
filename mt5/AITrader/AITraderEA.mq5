@@ -161,6 +161,9 @@ input double           InpMinRR           = 1.5;                     // [Custom]
 input double           InpMinSlAtr        = 0.5;                     // [Custom] Min SL distance (x ATR)
 input double           InpMaxSlAtr        = 3.0;                     // [Custom] Max SL distance (x ATR)
 input int              InpMaxPositions    = 3;                       // [Balanced] Max open positions
+input int              InpMaxPerSymbol    = 3;                       // Max trades per symbol (open positions + pending orders)
+input bool             InpNoAveragingDown = true;                    // Same-direction add only if existing trades are in profit
+input bool             InpAllowOpposite   = false;                   // Allow a trade opposite to an open position (hedge)
 input int              InpMaxTradesDay    = 6;                       // [Custom] Max new trades per day
 input double           InpMaxDailyLossPct = 3.0;                     // Daily equity drawdown limit (%)
 input bool             InpCloseOnDailyLoss= true;                    // Close all positions when daily limit hit
@@ -715,7 +718,7 @@ void ScanAndEnter()
      {
       if(ScanRow(i) == "") continue;              // no data, market closed, or spread too wide vs ATR
       tradeable++;
-      if(HasPosition(g_syms[i]) || HasPending(g_syms[i])) continue;
+      if(SymbolExposure(g_syms[i]) >= MathMax(1, InpMaxPerSymbol)) continue;
       if(!EntryAllowed(why)) { Print("AITrader: stop entries - ", why); break; }
       g_lastScan += g_syms[i] + " ";
       PrintFormat("AITrader: entry check %s", g_syms[i]);
@@ -796,7 +799,9 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "Use all context provided: trade with the HIGHER-TIMEFRAME trend unless a clear reversal is confirmed; anchor "
       "SL/TP to KEY LEVELS and VOLUME PROFILE value-area edges/POC; treat the TICK-FLOW PROXY as weak confirmation "
       "only; avoid entries shortly before high-impact news in the ECONOMIC CALENDAR; and review YOUR RECENT TRADES - "
-      "do not repeat setups that recently failed in similar conditions, but do not overreact to a single loss.",
+      "do not repeat setups that recently failed in similar conditions, but do not overreact to a single loss. "
+      "If this EA already has trades on this symbol (see Open positions / Pending orders), a new trade must be a "
+      "separate, high-quality setup - never add to a losing position, and do not duplicate an existing order.",
       remaining, PendingRules(idx), g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
    string user = SymbolContext(idx) + SizingHint(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
@@ -889,6 +894,8 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
                                                         err = StringFormat("SL %.2f ATR outside [%.2f, %.2f]", slDist / atr, g_cfg.slMin, g_cfg.slMax);
    else if(slDist <= minStop || tpDist <= minStop)      err = "SL/TP inside broker stop level";
    else if(tpDist / slDist < g_cfg.minRR)               err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, g_cfg.minRR);
+   else if(SymbolExposure(sym) >= MathMax(1, InpMaxPerSymbol)) err = StringFormat("max %d trades on %s", InpMaxPerSymbol, sym);
+   else                                                 err = StackingRule(sym, isBuy);
 
    double lots = 0;
    if(err == "")
@@ -2959,4 +2966,47 @@ void TrailingStops()
                 StringFormat("mechanical trail %.1f ATR, profit %.2fR", InpTrailAtr, profit / risk));
         }
      }
+  }
+
+//+------------------------------------------------------------------+
+//| MULTIPLE TRADES PER SYMBOL                                        |
+//+------------------------------------------------------------------+
+// Open positions + pending orders of this EA on 'sym'.
+int SymbolExposure(string sym)
+  {
+   int c = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(IsOurs(t) && PositionGetString(POSITION_SYMBOL) == sym) c++;
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+      if(IsOurPending(OrderGetTicket(i)) && OrderGetString(ORDER_SYMBOL) == sym) c++;
+   return c;
+  }
+
+// "" if a new trade in this direction is allowed next to the existing ones, otherwise the reason.
+string StackingRule(string sym, bool isBuy)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurs(t) || PositionGetString(POSITION_SYMBOL) != sym) continue;
+      bool posBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double pnl = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      if(posBuy != isBuy && !InpAllowOpposite)
+         return StringFormat("opposite %s position #%I64u is open (hedging disabled)", posBuy ? "BUY" : "SELL", t);
+      if(posBuy == isBuy && InpNoAveragingDown && pnl <= 0)
+         return StringFormat("would add to losing %s #%I64u (%.2f) - no averaging down", posBuy ? "BUY" : "SELL", t, pnl);
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!IsOurPending(t) || OrderGetString(ORDER_SYMBOL) != sym) continue;
+      long type = OrderGetInteger(ORDER_TYPE);
+      bool ordBuy = (type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP);
+      if(ordBuy != isBuy && !InpAllowOpposite)
+         return StringFormat("opposite pending order #%I64u is waiting (hedging disabled)", t);
+     }
+   return "";
   }
