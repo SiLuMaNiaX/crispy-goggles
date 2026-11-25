@@ -168,6 +168,8 @@ input bool             InpNoAveragingDown = true;                    // Same-dir
 input bool             InpAllowOpposite   = false;                   // Allow a trade opposite to an open position (hedge)
 input double           InpAccountRiskPct  = 4.0;                     // A. Account-wide open-risk cap, ALL positions/orders of any EA or manual (%)
 input double           InpSideRiskPct     = 2.0;                     // B. Max total risk on one direction of the same asset, e.g. all gold SELLs (%)
+input ENUM_TIMEFRAMES  InpConfirmTF       = PERIOD_M1;               // Lower timeframe for confirmation (PERIOD_CURRENT = off)
+input bool             InpCheckOnConfirmBar = true;                  // Run entry checks on every confirmation-timeframe bar
 input bool             InpStructureFilter = false;                   // Block trades against the decision-timeframe swing structure
 input int              InpMaxTradesDay    = 6;                       // [Custom] Max new trades per day
 input double           InpMaxDailyLossPct = 0.0;                     // Daily loss limit that halts the EA for the day (%; 0 = never halt)
@@ -263,6 +265,7 @@ struct RuntimeConfig
    ENUM_TRADE_MODE   mode;
    ENUM_TIMEFRAMES   scanTF;
    ENUM_TIMEFRAMES   manageTF;
+   ENUM_TIMEFRAMES   checkTF;      // how often the entry model is consulted
    int               bars;
    int               maxHoldMin;
    int               maxTradesDay;
@@ -363,7 +366,7 @@ int OnInit()
    if(MQLInfoInteger(MQL_TESTER))
       Print("AITrader: WebRequest is unavailable in the Strategy Tester; the EA will idle there.");
 
-   g_lastScanBar   = iTime(_Symbol, g_cfg.scanTF, 0); // first scan on the next bar
+   g_lastScanBar   = iTime(_Symbol, g_cfg.checkTF, 0); // first check on the next bar
    g_lastManageBar = iTime(_Symbol, g_cfg.manageTF, 0);
    EventSetTimer(g_cfg.timerSec);
    SetupChartForVisuals();
@@ -424,7 +427,7 @@ void OnTimer()
      }
 
    // 3. AI entry check on each new decision bar
-   datetime sBar = iTime(_Symbol, g_cfg.scanTF, 0);
+   datetime sBar = iTime(_Symbol, g_cfg.checkTF, 0);
    if(sBar != 0 && sBar != g_lastScanBar)
      {
       g_lastScanBar = sBar;
@@ -481,6 +484,12 @@ bool BuildConfig()
    int expDefault[] = {15, 45, 240, 1440, 120};          // superscalp, scalp, intraday, swing, custom
    g_cfg.pendingExpiryMin = InpPendingExpiryMin > 0 ? InpPendingExpiryMin : expDefault[(int)InpTradeMode];
    if(InpTimerSec > 0)      g_cfg.timerSec = (int)MathMax(2, InpTimerSec);
+   g_cfg.checkTF = g_cfg.scanTF;
+   if(InpConfirmTF != PERIOD_CURRENT && InpCheckOnConfirmBar && PeriodSeconds(InpConfirmTF) < PeriodSeconds(g_cfg.scanTF))
+     {
+      g_cfg.checkTF  = InpConfirmTF;
+      g_cfg.maxCalls = (int)MathMax(g_cfg.maxCalls, 3000);   // ~1 entry call per minute + management
+     }
    if(InpMaxAICallsDay > 0) g_cfg.maxCalls = InpMaxAICallsDay;
 
    //--- risk profile (Balanced = inputs as set) -----------------------
@@ -666,7 +675,7 @@ string ProfileBrief()
    if(InpDiscretion)
       return StringFormat("CONTEXT - trading style: %s (decisions every %s bar; time limit on positions: %s%s). "
                           "Session window: %s. Time now: %s.",
-                          ModeName(), TfName(g_cfg.scanTF), HoldText(),
+                          ModeName(), TfName(g_cfg.checkTF), HoldText(),
                           (InpCloseAtSessionEnd && g_cfg.mode != MODE_SWING) ? " or at the end of the session window" : "",
                           SessionWindowText(), LocalClocks());
    return StringFormat("TRADING STYLE - %s RISK PROFILE - %s SESSION - %s Today's window: %s. Time now: %s. "
@@ -1206,7 +1215,7 @@ string SymbolContext(int idx)
    s += StringFormat("Account equity %.2f %s, today P/L %.2f%%, open risk %.2f%%, trades today %d/%d\n",
                      eq, AccountInfoString(ACCOUNT_CURRENCY), dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0,
                      OpenRiskPct(), CountTodayEntries(), g_cfg.maxTradesDay);
-   s += StructureContext(idx) + HtfContext(sym) + KeyLevelsContext(sym) + VolumeProfileContext(sym) + TickFlowContext(sym) + NewsContext();
+   s += StructureContext(idx) + LowerTfContext(sym) + HtfContext(sym) + KeyLevelsContext(sym) + VolumeProfileContext(sym) + TickFlowContext(sym) + NewsContext();
    return s;
   }
 
@@ -2018,8 +2027,8 @@ void UpdateDashboard()
    PanelAddWrapped("CLOCKS", LocalClocks(), CLR_HEAD);
    PanelAddWrapped("AI", StringFormat("%s | last: %s | calls %d/%d", ProviderChain(), g_lastProvider,
                    g_calls, g_cfg.maxCalls), g_calls >= g_cfg.maxCalls ? CLR_BAD : CLR_TEXT);
-   PanelAddWrapped("TIMEFRAMES", StringFormat("scan %s, manage %s | %d symbols", TfName(g_cfg.scanTF),
-                   TfName(g_cfg.manageTF), ArraySize(g_syms)), CLR_TEXT);
+   PanelAddWrapped("TIMEFRAMES", StringFormat("setup %s, checks every %s, manage %s | %d symbols", TfName(g_cfg.scanTF),
+                   TfName(g_cfg.checkTF), TfName(g_cfg.manageTF), ArraySize(g_syms)), CLR_TEXT);
    PanelAddWrapped("LIMITS", StringFormat("risk/trade %.2f%% | min conf %.2f | min R:R %.1f | daily loss halt %s",
                    g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR,
                    InpMaxDailyLossPct > 0 ? StringFormat("%.1f%%", InpMaxDailyLossPct) : "off"), CLR_TEXT);
@@ -3206,7 +3215,7 @@ string DiscretionEntryPrompt(int idx, double remaining)
       "TRADING JOURNAL: for every BUY or SELL you must explain yourself - thesis = why you are taking this trade and "
       "what edge you see (max 80 words); invalidation = what price action would prove the idea wrong; plan = how you "
       "intend to manage and exit it. These are recorded with the outcome and shown back to you in future decisions.",
-      sym, TfName(g_cfg.scanTF), PeriodSeconds(g_cfg.scanTF) / 60, limits, SymDigits(sym));
+      sym, TfName(g_cfg.checkTF), PeriodSeconds(g_cfg.checkTF) / 60, limits, SymDigits(sym));
   }
 
 //+------------------------------------------------------------------+
@@ -3479,4 +3488,44 @@ string RecentDecisions(string sym)
       shown++;
      }
    return s == "" ? "" : "YOUR LAST DECISIONS ON " + sym + " (newest first):\n" + s;
+  }
+
+//+------------------------------------------------------------------+
+//| LOWER-TIMEFRAME CONFIRMATION (default M1)                         |
+//+------------------------------------------------------------------+
+string LowerTfContext(string sym)
+  {
+   ENUM_TIMEFRAMES tf = InpConfirmTF;
+   if(tf == PERIOD_CURRENT || PeriodSeconds(tf) >= PeriodSeconds(g_cfg.scanTF)) return "";
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int n = CopyRates(sym, tf, 1, 60, r);          // closed bars, newest first
+   if(n < 30) return "";
+   // swing structure from 2-bar fractals
+   double hs[2] = {0, 0}, ls[2] = {0, 0};
+   int nh = 0, nl = 0;
+   for(int i = 2; i < n - 2 && (nh < 2 || nl < 2); i++)
+     {
+      if(nh < 2 && r[i].high > r[i - 1].high && r[i].high > r[i - 2].high && r[i].high >= r[i + 1].high && r[i].high >= r[i + 2].high)
+        { hs[nh] = r[i].high; nh++; }
+      if(nl < 2 && r[i].low < r[i - 1].low && r[i].low < r[i - 2].low && r[i].low <= r[i + 1].low && r[i].low <= r[i + 2].low)
+        { ls[nl] = r[i].low; nl++; }
+     }
+   double c[];
+   ArrayResize(c, n);
+   for(int i = 0; i < n; i++) c[i] = r[n - 1 - i].close;   // oldest first
+   double e20 = EmaOf(c, 20);
+   string st = "RANGE";
+   if(nh == 2 && nl == 2)
+     {
+      if(hs[0] > hs[1] && ls[0] > ls[1]) st = "UP";
+      else if(hs[0] < hs[1] && ls[0] < ls[1]) st = "DOWN";
+     }
+   string s = StringFormat("LOWER TIMEFRAME %s (confirmation): structure %s", TfName(tf), st);
+   if(nh == 2 && nl == 2)
+      s += StringFormat(" (swing highs %s -> %s, swing lows %s -> %s)", Px(sym, hs[1]), Px(sym, hs[0]), Px(sym, ls[1]), Px(sym, ls[0]));
+   s += StringFormat(", close %s vs EMA20 %s\n  last 30 %s bars oldest first (o,h,l,c):", Px(sym, r[0].close), Px(sym, e20), TfName(tf));
+   for(int i = MathMin(29, n - 1); i >= 0; i--)
+      s += StringFormat(" [%s,%s,%s,%s]", Px(sym, r[i].open), Px(sym, r[i].high), Px(sym, r[i].low), Px(sym, r[i].close));
+   return s + "\n";
   }
