@@ -299,6 +299,9 @@ struct ClosedTrade
 
 //=== Globals =========================================================
 RuntimeConfig g_cfg;
+string        g_sizingText = "";
+int           g_sizingState = -1;   // -1 unknown, 0 cannot trade, 1 partial, 2 ok
+datetime      g_sizingAt = 0;
 NewsItem      g_news[];
 datetime      g_newsLoaded = 0;
 bool          g_newsWarned = false;
@@ -327,6 +330,7 @@ int OnInit()
    g_lastProvider = "-"; g_lastScan = "-"; g_lastEvent = "-"; g_scanSkipped = "";
    g_newsLoaded = 0; g_tradesDirty = true; ArrayResize(g_news, 0); ArrayResize(g_trades, 0);
    g_vizLast = 0; ArrayResize(g_vizMarkers, 0);
+   g_sizingText = ""; g_sizingState = -1; g_sizingAt = 0;
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
    AddProvider(InpP3Enabled && InpP3Model != "", "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
@@ -387,6 +391,7 @@ void OnTimer()
    bool tradesChanged = g_tradesDirty;
    LoadTrades();
    DrawVisuals(tradesChanged);
+   if(g_sizingAt == 0 || TimeCurrent() - g_sizingAt >= 3600) RunSizingCheck();
    if(!AlgoTradingOn()) { UpdateDashboard(); return; }
 
    // 1. Hard rules first (no AI needed)
@@ -852,7 +857,7 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "only; avoid entries shortly before high-impact news in the ECONOMIC CALENDAR; and review YOUR RECENT TRADES - "
       "do not repeat setups that recently failed in similar conditions, but do not overreact to a single loss.",
       remaining, PendingRules(idx), g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
-   string user = SymbolContext(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
+   string user = SymbolContext(idx) + SizingHint(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
    string content, used;
@@ -1985,6 +1990,8 @@ void UpdateDashboard()
                    g_cfg.riskPct, g_cfg.minConf, g_cfg.minRR, InpMaxDailyLossPct), CLR_TEXT);
    PanelAddWrapped("DAY P/L", StringFormat("%+.2f%%", dayPct), dayPct > 0 ? CLR_GOOD : (dayPct < 0 ? CLR_BAD : CLR_TEXT));
    double openRisk = OpenRiskPct();
+   if(g_sizingText != "")
+      PanelAddWrapped("SIZING", g_sizingText, g_sizingState == 2 ? CLR_GOOD : (g_sizingState == 1 ? CLR_WARN : CLR_BAD));
    PanelAddWrapped("EXPOSURE", StringFormat("open risk %.2f%% / %.2f%% | positions %d/%d | trades today %d/%d",
                    openRisk, InpMaxTotalRiskPct, CountPositions(), g_cfg.maxPositions,
                    CountTodayEntries(), g_cfg.maxTradesDay),
@@ -2842,4 +2849,79 @@ string ShadowSplitText()
    return StringFormat("agreed %d (net %+.2f, PF %.2f) | disagreed %d (net %+.2f, PF %.2f)",
                        na, neta, gla > 0 ? gpa / gla : (gpa > 0 ? 99.0 : 0.0),
                        nd, netd, gld > 0 ? gpd / gld : (gpd > 0 ? 99.0 : 0.0));
+  }
+
+//+------------------------------------------------------------------+
+//| POSITION-SIZING CHECK: can the minimum lot respect the risk %?    |
+//+------------------------------------------------------------------+
+// Widest stop distance (price units) the minimum lot allows at the current risk %; 0 if unknown.
+double MaxStopForMinLot(string sym, double &lossPerUnit, double &unit)
+  {
+   double bid  = SymbolInfoDouble(sym, SYMBOL_BID);
+   double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   unit = bid > 100 ? 1.0 : 0.001;               // gold: $1 move; FX: 10 pips
+   double pnl = 0;
+   if(bid <= 0 || !OrderCalcProfit(ORDER_TYPE_BUY, sym, vmin, bid, bid - unit, pnl) || pnl >= 0) return 0;
+   lossPerUnit = -pnl;
+   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * g_cfg.riskPct / 100.0;
+   return riskMoney / lossPerUnit * unit;
+  }
+
+void RunSizingCheck()
+  {
+   int idx = SymbolIndex(_Symbol);
+   if(idx < 0 && ArraySize(g_syms) > 0) idx = 0;
+   if(idx < 0) return;
+   string sym = g_syms[idx];
+   double atr = Buf(g_hATR[idx]);
+   if(atr <= 0) return;                          // indicator not ready yet; retry next tick
+   g_sizingAt = TimeCurrent();
+
+   double lossPerUnit = 0, unit = 1;
+   double maxSl = MaxStopForMinLot(sym, lossPerUnit, unit);
+   if(maxSl <= 0) { g_sizingText = "could not calculate (OrderCalcProfit failed)"; g_sizingState = -1; return; }
+
+   string cur = AccountInfoString(ACCOUNT_CURRENCY);
+   double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * g_cfg.riskPct / 100.0;
+   double maxAtr = maxSl / atr;
+   double typical = (g_cfg.slMin + g_cfg.slMax) / 2 * atr;
+   double needEquity = lossPerUnit * (typical / unit) / (g_cfg.riskPct / 100.0);
+   string unitTxt = unit == 1.0 ? "$1" : "10 pips";
+
+   if(maxAtr >= g_cfg.slMax)
+     {
+      g_sizingState = 2;
+      g_sizingText = StringFormat("OK: %.2f lot risks %.2f %s per %s; all stops up to %.1f ATR fit",
+                                  vmin, lossPerUnit, cur, unitTxt, g_cfg.slMax);
+     }
+   else if(maxAtr >= g_cfg.slMin)
+     {
+      g_sizingState = 1;
+      g_sizingText = StringFormat("PARTIAL: min lot fits stops <= %s (%.2f ATR) only; wider stops are skipped",
+                                  Px(sym, maxSl), maxAtr);
+     }
+   else
+     {
+      g_sizingState = 0;
+      g_sizingText = StringFormat("CANNOT TRADE: min lot over-risks even at %.1f ATR; need ~%.0f %s equity or more risk %%",
+                                  g_cfg.slMin, needEquity, cur);
+     }
+   PrintFormat("AITrader: SIZING %s | min lot %.2f loses %.2f %s per %s move (%.2f per 1 ATR = %s) | risk %.2f%% = %.2f %s "
+               "-> widest stop for min lot %s (%.2f ATR) | allowed stops %.1f-%.1f ATR | equity for a typical %.1f ATR stop: %.0f %s",
+               sym, vmin, lossPerUnit, cur, unitTxt, lossPerUnit * atr / unit, Px(sym, atr), g_cfg.riskPct, riskMoney, cur,
+               Px(sym, maxSl), maxAtr, g_cfg.slMin, g_cfg.slMax, typical / atr, needEquity, cur);
+   PrintFormat("AITrader: SIZING verdict - %s", g_sizingText);
+  }
+
+// Tells the entry model the widest stop the minimum lot allows, so it plans stops that can actually be traded.
+string SizingHint(int idx)
+  {
+   string sym = g_syms[idx];
+   double lossPerUnit = 0, unit = 1;
+   double maxSl = MaxStopForMinLot(sym, lossPerUnit, unit);
+   if(maxSl <= 0) return "";
+   return StringFormat("POSITION SIZING: with the minimum lot (%.2f) the stop-loss can be at most %s away from entry "
+                       "at the current risk cap; wider stops cannot be traded and will be rejected.\n",
+                       SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN), Px(sym, maxSl));
   }
