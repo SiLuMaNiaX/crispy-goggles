@@ -152,6 +152,25 @@ Each job has its own ordered list of providers. If the first one fails, the EA t
 
 The provider names are `asAi`, `DeepSeek` and `OpenRouter`. OpenRouter is an optional extra backup: set its *Model slug* to use it. **There is no scanner:** on every decision bar, each tradeable symbol in the watchlist goes straight to the entry model.
 
+## Account-wide and same-direction risk caps
+
+These count **every** position and pending order on the account: other copies of this EA, other EAs, and manual trades.
+
+| Input | Default | Rule |
+|---|---|---|
+| *Account-wide open-risk cap* | 4% | No new trade while the risk of everything open (to each stop-loss) is at the cap; new trades are sized to fit what's left. |
+| *Max total risk on one direction of the same asset* | 2% | E.g. all gold SELLs together, across XAUUSDc, XAUUSD247c and so on. A new SELL only gets what remains of the 2%. |
+
+Positions without a stop-loss count as one full trade's risk. The panel's **ACCOUNT** line shows the current values.
+
+## Entry plan → position manager
+
+The position manager (**asAi first**, then DeepSeek) receives each trade's recorded **thesis, invalidation and plan**, and is told to close when the invalidation has happened and to follow any time-, event- or level-based exit in the plan. In Scalping, positions are reviewed on every M5 bar.
+
+## Separate files per copy
+
+Log and journal names get the magic number added automatically (`AITraderEA_log_26112501.csv`, `AITraderEA_journal_26112501.csv`), so copies with different magic numbers never share a file.
+
 ## Trading journal
 
 `MQL5\Files\AITraderEA_journal.csv` holds one story per trade:
