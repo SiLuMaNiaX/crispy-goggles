@@ -152,6 +152,16 @@ Each job has its own ordered list of providers. If the first one fails, the EA t
 
 The provider names are `asAi`, `DeepSeek` and `OpenRouter`. OpenRouter is an optional extra backup: set its *Model slug* to use it. **There is no scanner:** on every decision bar, each tradeable symbol in the watchlist goes straight to the entry model.
 
+## Discretion mode (default)
+
+*AI trades on its own judgement* = **true**. The entry model receives:
+- the market data, labelled as information it may weigh however it sees fit;
+- the **hard limits** the EA enforces (risk range, SL ATR range, min R:R, order types, news and spread filters, per-symbol rules), so its orders aren't rejected;
+- the holding period, session window and time;
+- **no strategy instructions**: no trend-following rule, no level-anchoring advice, no style or profile coaching.
+
+The position manager likewise only gets the options and limits ("manage it with your own judgement"). All risk protection stays active: risk caps, daily loss limit, SL range, min R:R, news/spread filters, trailing stop, session and Friday closes. The market-structure filter is a strategy rule, so it defaults to **off** in this version; switch it on to block counter-structure trades. Set *AI trades on its own judgement* = false to go back to the guided prompts.
+
 ## Market-structure filter
 
 The EA reads swing highs and lows on the decision timeframe (M5 in Scalping) using 2-bar fractals, plus the EMA20 direction:
@@ -159,7 +169,7 @@ The EA reads swing highs and lows on the decision timeframe (M5 in Scalping) usi
 - **DOWN:** lower highs and lower lows, with price below a falling EMA20. **BUY entries are blocked.**
 - **RANGE / WEAK:** no block.
 
-**Exception:** a SELL STOP below the last swing low, or a BUY STOP above the last swing high, is allowed, because it only fills if the structure breaks. The AI sees the structure reading every time and is told that the decision timeframe's structure decides direction; higher timeframes are context only, because their EMAs lag after a reversal. Input: *Block trades against the decision-timeframe swing structure*.
+**Exception:** a SELL STOP below the last swing low, or a BUY STOP above the last swing high, is allowed, because it only fills if the structure breaks. The AI sees the structure reading every time and is told that the decision timeframe's structure decides direction; higher timeframes are context only, because their EMAs lag after a reversal. Input: *Block trades against the decision-timeframe swing structure* (default **off**; see Discretion mode).
 
 ## Several trades on the same symbol
 

@@ -93,6 +93,7 @@ input ENUM_TRADE_MODE   InpTradeMode      = MODE_INTRADAY;           // Trading 
 input ENUM_SESSION_BIAS InpSession        = SESSION_NONE;            // Session bias
 input ENUM_RISK_PROFILE InpRiskProfile    = PROFILE_CONSERVATIVE;    // Risk profile
 input bool              InpCloseAtSessionEnd = true;                 // Non-swing modes: close positions when the session ends
+input bool              InpDiscretion     = true;                    // AI trades on its own judgement (no strategy instructions, only hard limits)
 
 // Each job (entry, scan, manage, review) has its own ordered provider list; the next one is tried when one fails.
 // A provider that fails is skipped for InpFailoverCooldownMin minutes.
@@ -164,7 +165,7 @@ input int              InpMaxPositions    = 3;                       // [Balance
 input int              InpMaxPerSymbol    = 3;                       // Max trades per symbol (open positions + pending orders)
 input bool             InpNoAveragingDown = true;                    // Same-direction add only if existing trades are in profit
 input bool             InpAllowOpposite   = false;                   // Allow a trade opposite to an open position (hedge)
-input bool             InpStructureFilter = true;                    // Block trades against the decision-timeframe swing structure
+input bool             InpStructureFilter = false;                   // Block trades against the decision-timeframe swing structure
 input int              InpMaxTradesDay    = 6;                       // [Custom] Max new trades per day
 input double           InpMaxDailyLossPct = 3.0;                     // Daily equity drawdown limit (%)
 input bool             InpCloseOnDailyLoss= true;                    // Close all positions when daily limit hit
@@ -648,6 +649,12 @@ string ProfileName()
 // Prepended to every AI system prompt so all stages share the same style.
 string ProfileBrief()
   {
+   if(InpDiscretion)
+      return StringFormat("CONTEXT - holding period: %s (decisions every %s bar, positions are closed after %s%s). "
+                          "Session window: %s. Time now: %s.",
+                          ModeName(), TfName(g_cfg.scanTF), HoldText(),
+                          (InpCloseAtSessionEnd && g_cfg.mode != MODE_SWING) ? " or at the end of the session window" : "",
+                          SessionWindowText(), LocalClocks());
    return StringFormat("TRADING STYLE - %s RISK PROFILE - %s SESSION - %s Today's window: %s. Time now: %s. "
                        "Risk per trade is capped at %.2f%% of equity; minimum reward:risk %.1f.",
                        g_cfg.styleText, g_cfg.profileText, g_cfg.sessionText, SessionWindowText(), LocalClocks(),
@@ -808,6 +815,7 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "If this EA already has trades on this symbol (see Open positions / Pending orders), a new trade must be a "
       "separate, high-quality setup - never add to a losing position, and do not duplicate an existing order.",
       remaining, PendingRules(idx), g_cfg.slMin, g_cfg.slMax, g_cfg.minRR, SymDigits(sym));
+   if(InpDiscretion) system = DiscretionEntryPrompt(idx, remaining);
    string user = SymbolContext(idx) + SizingHint(idx) + SelfReviewContext() + PendingSummary() + "Open positions:\n" + PositionsSummary() +
                  StringFormat("Remaining risk budget: %.2f%% of equity\n", remaining);
 
@@ -989,13 +997,15 @@ void ManageOne(ulong ticket)
    string system = StringFormat(
       "You manage an open %s position on %s. Choose ONE action: HOLD, CLOSE (exit now), PARTIAL (close part, "
       "give close_fraction 0.1-0.9), or MODIFY (new_sl and/or new_tp; use 0 to keep). The stop-loss may only be "
-      "moved in the trade's favour (tightened), never widened. Lock profits on strength, cut the trade when the "
-      "setup is invalidated, and avoid over-managing: HOLD is the normal answer while the thesis is intact. %s"
+      "moved in the trade's favour (tightened), never widened. %s%s"
       "Reply ONLY with JSON: {\"action\":\"HOLD\"|\"CLOSE\"|\"PARTIAL\"|\"MODIFY\",\"confidence\":0.0-1.0,"
       "\"new_sl\":price,\"new_tp\":price,\"close_fraction\":0.0,\"reason\":\"max 25 words\"}. Prices with %d decimals.",
       isBuy ? "BUY" : "SELL", sym,
+      InpDiscretion ? "Manage it with your own judgement. "
+                    : "Lock profits on strength, cut the trade when the setup is invalidated, and avoid over-managing: "
+                      "HOLD is the normal answer while the thesis is intact. ",
       InpTrailEnabled ? StringFormat("The EA runs a mechanical trailing stop (starts at %.1fR, %.1f ATR behind price); "
-                                     "only MODIFY the stop for a clear structural reason. ", InpTrailStartR, InpTrailAtr) : "",
+                                     "it only ever tightens. ", InpTrailStartR, InpTrailAtr) : "",
       dg);
    string user = StringFormat(
       "Position #%I64u %s %s %.2f lots, opened %s (%.1f h ago) at %s. Current %s. SL %s TP %s. "
@@ -2503,7 +2513,7 @@ string TickFlowContext(string sym)
    if(n < 50) return "";
 
    int    wins[] = {5, 15, 60};
-   string s = "TICK-FLOW PROXY (counts of quote up-ticks vs down-ticks; NOT real exchange volume - weight lightly):\n";
+   string s = "TICK-FLOW PROXY (counts of quote up-ticks vs down-ticks from the broker feed; not real exchange volume):\n";
    for(int w = 0; w < 3; w++)
      {
       long start = (long)to - (long)wins[w] * 60000;
@@ -3079,4 +3089,43 @@ string StructureRule(int idx, bool isBuy, string ord, double entry)
       return "counter-structure BUY (" + TfName(g_cfg.scanTF) + " downtrend: " + det + ")";
      }
    return "";
+  }
+
+//+------------------------------------------------------------------+
+//| DISCRETION MODE: data + hard limits only, no strategy coaching    |
+//+------------------------------------------------------------------+
+string HoldText()
+  {
+   if(g_cfg.maxHoldMin <= 0) return "no time limit";
+   return g_cfg.maxHoldMin >= 120 ? StringFormat("%d h", g_cfg.maxHoldMin / 60) : StringFormat("%d min", g_cfg.maxHoldMin);
+  }
+
+string DiscretionEntryPrompt(int idx, double remaining)
+  {
+   string sym = g_syms[idx];
+   double atr = Buf(g_hATR[idx]);
+   string limits = StringFormat(
+      "- risk_percent between 0 and %.2f (%% of equity lost if the stop-loss is hit)\n"
+      "- stop-loss %.1f-%.1f x ATR from entry (ATR now %s), take-profit at least %.1f x the stop distance\n"
+      "- order MARKET (BUY fills at ask, SELL at bid)%s\n"
+      "- no new entries from %d min before to %d min after high-impact %s news; spread must be <= %.2f x ATR\n"
+      "- at most %d trades on %s at once; %s%s\n",
+      remaining, g_cfg.slMin, g_cfg.slMax, Px(sym, atr), g_cfg.minRR,
+      InpAllowPending ? StringFormat(", LIMIT or STOP (entry within %.1f x ATR of price, expiry_min up to %d)", InpPendingMaxAtr, g_cfg.pendingExpiryMin) : "",
+      InpNewsBeforeMin, InpNewsAfterMin, InpNewsCurrencies, g_cfg.maxSpreadAtr,
+      MathMax(1, InpMaxPerSymbol), sym,
+      InpNoAveragingDown ? "no adding to a losing position; " : "",
+      InpAllowOpposite ? "" : "no trade opposite to an open position");
+   if(InpStructureFilter)
+      limits += "- no SELL while the MARKET STRUCTURE line says UP, no BUY while it says DOWN (STOP orders beyond the last swing excepted)\n";
+   return StringFormat(
+      "You are an experienced discretionary trader of %s. Using your own judgement and methodology, decide whether "
+      "to place ONE trade now. You choose the direction, order type, entry, stop-loss, take-profit and how much to "
+      "risk. The market data below is information only - weigh it however you see fit, or ignore it. HOLD is a valid "
+      "answer whenever you see no trade worth taking.\n"
+      "Hard limits enforced by the EA (anything outside them is rejected):\n%s"
+      "Reply ONLY with JSON: {\"action\":\"BUY\"|\"SELL\"|\"HOLD\",\"order\":\"MARKET\"|\"LIMIT\"|\"STOP\","
+      "\"entry\":price,\"expiry_min\":minutes,\"confidence\":0.0-1.0,\"risk_percent\":number,"
+      "\"sl\":price,\"tp\":price,\"reason\":\"max 30 words\"}. Prices with %d decimals.",
+      sym, limits, SymDigits(sym));
   }
