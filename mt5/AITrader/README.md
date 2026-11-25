@@ -152,6 +152,15 @@ Each job has its own ordered list of providers. If the first one fails, the EA t
 
 The provider names are `asAi`, `DeepSeek` and `OpenRouter`. OpenRouter is an optional extra backup: set its *Model slug* to use it. **There is no scanner:** on every decision bar, each tradeable symbol in the watchlist goes straight to the entry model.
 
+## Market-structure filter
+
+The EA reads swing highs and lows on the decision timeframe (M5 in Scalping) using 2-bar fractals, plus the EMA20 direction:
+- **UP:** higher highs and higher lows, with price above a rising EMA20. **SELL entries are blocked.**
+- **DOWN:** lower highs and lower lows, with price below a falling EMA20. **BUY entries are blocked.**
+- **RANGE / WEAK:** no block.
+
+**Exception:** a SELL STOP below the last swing low, or a BUY STOP above the last swing high, is allowed, because it only fills if the structure breaks. The AI sees the structure reading every time and is told that the decision timeframe's structure decides direction; higher timeframes are context only, because their EMAs lag after a reversal. Input: *Block trades against the decision-timeframe swing structure*.
+
 ## Several trades on the same symbol
 
 | Input | Default | Rule |

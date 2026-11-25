@@ -164,6 +164,7 @@ input int              InpMaxPositions    = 3;                       // [Balance
 input int              InpMaxPerSymbol    = 3;                       // Max trades per symbol (open positions + pending orders)
 input bool             InpNoAveragingDown = true;                    // Same-direction add only if existing trades are in profit
 input bool             InpAllowOpposite   = false;                   // Allow a trade opposite to an open position (hedge)
+input bool             InpStructureFilter = true;                    // Block trades against the decision-timeframe swing structure
 input int              InpMaxTradesDay    = 6;                       // [Custom] Max new trades per day
 input double           InpMaxDailyLossPct = 3.0;                     // Daily equity drawdown limit (%)
 input bool             InpCloseOnDailyLoss= true;                    // Close all positions when daily limit hit
@@ -796,7 +797,11 @@ void EvaluateEntry(int idx, string bias, double score, string note)
       "logical swing level, %.1f-%.1f ATR from entry. TP at least %.1f x SL distance at a realistic target; when "
       "the higher timeframes and momentum favour a break, the target may be the next level BEYOND a nearby one. "
       "Prices with %d decimals. HOLD with risk_percent 0 when the edge is unclear. "
-      "Use all context provided: trade with the HIGHER-TIMEFRAME trend unless a clear reversal is confirmed; anchor "
+      "Use all context provided. MARKET STRUCTURE on the decision timeframe decides direction: never SELL while it "
+      "makes higher highs and higher lows above a rising EMA20, never BUY while it makes lower highs and lower lows "
+      "below a falling EMA20 - wait for the structure to break (or use a STOP order beyond the last swing). HIGHER "
+      "TIMEFRAMES are context: prefer trades that agree with them, but their EMAs lag, so a fresh M5 reversal can "
+      "override them. Anchor "
       "SL/TP to KEY LEVELS and VOLUME PROFILE value-area edges/POC; treat the TICK-FLOW PROXY as weak confirmation "
       "only; avoid entries shortly before high-impact news in the ECONOMIC CALENDAR; and review YOUR RECENT TRADES - "
       "do not repeat setups that recently failed in similar conditions, but do not overreact to a single loss. "
@@ -896,6 +901,7 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    else if(tpDist / slDist < g_cfg.minRR)               err = StringFormat("R:R %.2f < %.2f", tpDist / slDist, g_cfg.minRR);
    else if(SymbolExposure(sym) >= MathMax(1, InpMaxPerSymbol)) err = StringFormat("max %d trades on %s", InpMaxPerSymbol, sym);
    else                                                 err = StackingRule(sym, isBuy);
+   if(err == "") err = StructureRule(idx, isBuy, ord, entry);
 
    double lots = 0;
    if(err == "")
@@ -1146,7 +1152,7 @@ string SymbolContext(int idx)
    s += StringFormat("Account equity %.2f %s, today P/L %.2f%%, open risk %.2f%%, trades today %d/%d\n",
                      eq, AccountInfoString(ACCOUNT_CURRENCY), dayEq > 0 ? (eq - dayEq) / dayEq * 100 : 0.0,
                      OpenRiskPct(), CountTodayEntries(), g_cfg.maxTradesDay);
-   s += HtfContext(sym) + KeyLevelsContext(sym) + VolumeProfileContext(sym) + TickFlowContext(sym) + NewsContext();
+   s += StructureContext(idx) + HtfContext(sym) + KeyLevelsContext(sym) + VolumeProfileContext(sym) + TickFlowContext(sym) + NewsContext();
    return s;
   }
 
@@ -3007,6 +3013,70 @@ string StackingRule(string sym, bool isBuy)
       bool ordBuy = (type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP);
       if(ordBuy != isBuy && !InpAllowOpposite)
          return StringFormat("opposite pending order #%I64u is waiting (hedging disabled)", t);
+     }
+   return "";
+  }
+
+//+------------------------------------------------------------------+
+//| MARKET STRUCTURE (decision timeframe, 2-bar fractal swings)       |
+//+------------------------------------------------------------------+
+// Returns UP / DOWN (structure + EMA20 agree), WEAK_UP / WEAK_DOWN, RANGE or UNKNOWN.
+string StructureState(int idx, double &lastHigh, double &lastLow, string &detail)
+  {
+   string sym = g_syms[idx];
+   lastHigh = 0; lastLow = 0; detail = "";
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int n = CopyRates(sym, g_cfg.scanTF, 1, 80, r);   // closed bars, newest first
+   if(n < 20) return "UNKNOWN";
+   double hs[2] = {0, 0}, ls[2] = {0, 0};
+   int nh = 0, nl = 0;
+   for(int i = 2; i < n - 2 && (nh < 2 || nl < 2); i++)
+     {
+      if(nh < 2 && r[i].high > r[i - 1].high && r[i].high > r[i - 2].high && r[i].high >= r[i + 1].high && r[i].high >= r[i + 2].high)
+        { hs[nh] = r[i].high; nh++; }
+      if(nl < 2 && r[i].low < r[i - 1].low && r[i].low < r[i - 2].low && r[i].low <= r[i + 1].low && r[i].low <= r[i + 2].low)
+        { ls[nl] = r[i].low; nl++; }
+     }
+   if(nh < 2 || nl < 2) return "UNKNOWN";
+   lastHigh = hs[0]; lastLow = ls[0];
+   double e1 = Buf(g_hE20[idx], 1), e4 = Buf(g_hE20[idx], 4), c = r[0].close;
+   string st = "RANGE";
+   if(hs[0] > hs[1] && ls[0] > ls[1]) st = "UP";
+   else if(hs[0] < hs[1] && ls[0] < ls[1]) st = "DOWN";
+   detail = StringFormat("swing highs %s -> %s, swing lows %s -> %s, price %s EMA20 %s (%s)",
+                         Px(sym, hs[1]), Px(sym, hs[0]), Px(sym, ls[1]), Px(sym, ls[0]),
+                         c > e1 ? "above" : "below", Px(sym, e1), e1 > e4 ? "rising" : (e1 < e4 ? "falling" : "flat"));
+   if(st == "UP"   && c > e1 && e1 > e4) return "UP";
+   if(st == "DOWN" && c < e1 && e1 < e4) return "DOWN";
+   return st == "RANGE" ? "RANGE" : "WEAK_" + st;
+  }
+
+string StructureContext(int idx)
+  {
+   double hi, lo; string det;
+   string st = StructureState(idx, hi, lo, det);
+   if(st == "UNKNOWN") return "";
+   string rule = st == "UP"   ? " -> SELL entries are blocked by the EA (except a SELL STOP below the last swing low)"
+               : st == "DOWN" ? " -> BUY entries are blocked by the EA (except a BUY STOP above the last swing high)" : "";
+   return StringFormat("MARKET STRUCTURE (%s): %s | %s%s\n", TfName(g_cfg.scanTF), st, det, InpStructureFilter ? rule : "");
+  }
+
+// Hard rule: no trade against a confirmed decision-timeframe structure, except a STOP order that only fills if it breaks.
+string StructureRule(int idx, bool isBuy, string ord, double entry)
+  {
+   if(!InpStructureFilter) return "";
+   double hi, lo; string det;
+   string st = StructureState(idx, hi, lo, det);
+   if(!isBuy && st == "UP")
+     {
+      if(ord == "STOP" && lo > 0 && entry < lo) return "";
+      return "counter-structure SELL (" + TfName(g_cfg.scanTF) + " uptrend: " + det + ")";
+     }
+   if(isBuy && st == "DOWN")
+     {
+      if(ord == "STOP" && hi > 0 && entry > hi) return "";
+      return "counter-structure BUY (" + TfName(g_cfg.scanTF) + " downtrend: " + det + ")";
      }
    return "";
   }
