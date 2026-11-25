@@ -1160,12 +1160,33 @@ string PositionsSummary()
 //+------------------------------------------------------------------+
 //| Risk / sizing                                                     |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Money lost (account currency, positive) if 'vol' lots move from   |
+//| 'from' to 'to' against the position. Uses OrderCalcProfit, and    |
+//| falls back to tick value when it fails (e.g. cent-account         |
+//| currency conversion). Returns 0 if neither works.                 |
+//+------------------------------------------------------------------+
+double LossBetween(string sym, bool isBuy, double vol, double from, double to)
+  {
+   double pnl = 0;
+   ResetLastError();
+   if(OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, sym, vol, from, to, pnl) && pnl < 0)
+      return -pnl;
+   double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   double tickLoss = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tickLoss <= 0) tickLoss = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+   double dist = isBuy ? from - to : to - from;
+   if(tickSize <= 0 || tickLoss <= 0 || dist <= 0) return 0;
+   return dist / tickSize * tickLoss * vol;
+  }
+
 double LotsForRisk(string sym, bool isBuy, double entry, double sl, double riskPct)
   {
    double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * riskPct / 100.0;
    ENUM_ORDER_TYPE type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double pnl = 0;
-   if(!OrderCalcProfit(type, sym, 1.0, entry, sl, pnl) || pnl >= 0) return 0;
+   pnl = -LossBetween(sym, isBuy, 1.0, entry, sl);
+   if(pnl >= 0) return 0;
    double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
    double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN), vmax = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
    double lots = MathFloor(riskMoney / -pnl / step) * step;
@@ -1192,10 +1213,9 @@ double OpenRiskPct()
       double sl = PositionGetDouble(POSITION_SL);
       if(sl == 0) { pct += g_cfg.riskPct; continue; }
       bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-      double pnl = 0;
-      if(OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, PositionGetString(POSITION_SYMBOL),
-                         PositionGetDouble(POSITION_VOLUME), PositionGetDouble(POSITION_PRICE_CURRENT), sl, pnl) && pnl < 0)
-         pct += -pnl / eq * 100.0;
+      double loss = LossBetween(PositionGetString(POSITION_SYMBOL), isBuy, PositionGetDouble(POSITION_VOLUME),
+                                PositionGetDouble(POSITION_PRICE_CURRENT), sl);
+      if(loss > 0) pct += loss / eq * 100.0;
      }
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
@@ -1205,10 +1225,9 @@ double OpenRiskPct()
       if(sl == 0) { pct += g_cfg.riskPct; continue; }
       long type = OrderGetInteger(ORDER_TYPE);
       bool isBuy = (type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP);
-      double pnl = 0;
-      if(OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, OrderGetString(ORDER_SYMBOL),
-                         OrderGetDouble(ORDER_VOLUME_CURRENT), OrderGetDouble(ORDER_PRICE_OPEN), sl, pnl) && pnl < 0)
-         pct += -pnl / eq * 100.0;
+      double loss = LossBetween(OrderGetString(ORDER_SYMBOL), isBuy, OrderGetDouble(ORDER_VOLUME_CURRENT),
+                                OrderGetDouble(ORDER_PRICE_OPEN), sl);
+      if(loss > 0) pct += loss / eq * 100.0;
      }
    return pct;
   }
@@ -2227,9 +2246,8 @@ void LoadTrades()
       c.volume = inVol;
       c.closePrice = outValue / outVol;
       if(entryOrder != 0) c.sl = HistoryOrderGetDouble(entryOrder, ORDER_SL);
-      double pnl = 0;
-      if(c.sl > 0 && OrderCalcProfit(c.dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, c.sym, inVol, c.openPrice, c.sl, pnl) && pnl < 0)
-         c.rMult = c.net / -pnl;
+      double riskMoney = c.sl > 0 ? LossBetween(c.sym, c.dir > 0, inVol, c.openPrice, c.sl) : 0;
+      if(riskMoney > 0) c.rMult = c.net / riskMoney;
       int n = ArraySize(g_trades);
       ArrayResize(g_trades, n + 1);
       g_trades[n] = c;
@@ -2573,10 +2591,10 @@ void VzVLine(string id, datetime t, color c, string txt)
 void VzLevel(string id, datetime t1, double p, color c, ENUM_LINE_STYLE st, string label)
   {
    if(p <= 0) return;
-   datetime t2 = TimeCurrent() + PeriodSeconds() * 6;
+   datetime t2 = TimeCurrent() + PeriodSeconds();
    string tip = label + " " + Px(_Symbol, p);
    VzTrend("L_" + id, t1, p, t2, p, c, st, 1, tip);
-   VzText("LT_" + id, t2, p, " " + label + " " + Px(_Symbol, p), c, ANCHOR_LEFT, 7, tip);
+   VzText("LT_" + id, t2, p, (label == "" ? "" : label + " ") + Px(_Symbol, p), c, ANCHOR_RIGHT_LOWER, 7, tip);
   }
 
 void DrawLevels()
@@ -2611,7 +2629,7 @@ void DrawLevels()
          double hi = a[0].high, lo = a[0].low;
          for(int i = 1; i < n; i++) { hi = MathMax(hi, a[i].high); lo = MathMin(lo, a[i].low); }
          string tip = StringFormat("Asian range %s - %s", Px(sym, lo), Px(sym, hi));
-         VzRect("ASIA", aFrom, hi, aTo, lo, VZ_ASIA, true, tip);
+         VzRect("ASIA", aFrom, hi, now < aTo ? now : aTo, lo, VZ_ASIA, true, tip + (now < aTo ? " (forming)" : ""));
          VzText("ASIAT", aFrom, hi, "Asian range", C'90,110,150', ANCHOR_LEFT_LOWER, 7, tip);
         }
      }
@@ -2668,7 +2686,7 @@ void DrawProfile()
       if(up < 0 && dn < 0) break;
       if(up >= dn) { hi_i++; acc += up; } else { lo_i--; acc += dn; }
      }
-   datetime x0 = TimeCurrent() + PeriodSeconds() * 3;
+   datetime x0 = TimeCurrent() + PeriodSeconds() * 4;
    int maxBars = 28;
    for(int k = 0; k < rows; k++)
      {
@@ -2804,9 +2822,9 @@ double MaxStopForMinLot(string sym, double &lossPerUnit, double &unit)
    double bid  = SymbolInfoDouble(sym, SYMBOL_BID);
    double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
    unit = bid > 100 ? 1.0 : 0.001;               // gold: $1 move; FX: 10 pips
-   double pnl = 0;
-   if(bid <= 0 || !OrderCalcProfit(ORDER_TYPE_BUY, sym, vmin, bid, bid - unit, pnl) || pnl >= 0) return 0;
-   lossPerUnit = -pnl;
+   if(bid <= 0) return 0;
+   lossPerUnit = LossBetween(sym, true, vmin, bid, bid - unit);
+   if(lossPerUnit <= 0) return 0;
    double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * g_cfg.riskPct / 100.0;
    return riskMoney / lossPerUnit * unit;
   }
@@ -2823,7 +2841,13 @@ void RunSizingCheck()
 
    double lossPerUnit = 0, unit = 1;
    double maxSl = MaxStopForMinLot(sym, lossPerUnit, unit);
-   if(maxSl <= 0) { g_sizingText = "could not calculate (OrderCalcProfit failed)"; g_sizingState = -1; return; }
+   if(maxSl <= 0)
+     {
+      g_sizingText = StringFormat("could not calculate yet (error %d) - retrying", GetLastError());
+      g_sizingState = -1;
+      g_sizingAt = TimeCurrent() - 3600 + 60;    // retry in about a minute
+      return;
+     }
 
    string cur = AccountInfoString(ACCOUNT_CURRENCY);
    double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
