@@ -103,7 +103,6 @@ input string           InpP1Url           = "https://serveras.click/v1/chat/comp
 input string           InpP1Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP1KeyFile       = "aitrader_key_asai.txt"; // Key file in <Common>\Files
 input string           InpP1Model         = "asai/gpt-6.2-astra";    // Model id (copy from asAi > Models)
-input string           InpModelScan       = "";                      // Primary model for SCAN (empty = Model id)
 input string           InpModelEntry      = "";                      // Primary model for ENTRY (empty = Model id)
 input string           InpModelManage     = "";                      // Primary model for MANAGE (empty = Model id)
 
@@ -113,16 +112,14 @@ input string           InpP2Key           = "";                      // API key 
 input string           InpP2KeyFile       = "aitrader_key_deepseek.txt"; // Key file in <Common>\Files
 input string           InpP2Model         = "deepseek-chat";         // Model
 
-input group "AI provider 3 - OpenRouter (cheap scanner + scanner backup)"
+input group "AI provider 3 - OpenRouter (optional extra backup)"
 input bool             InpP3Enabled       = true;                    // Enabled
 input string           InpP3Key           = "";                      // API key - LEAVE EMPTY (inputs are printed in logs)
 input string           InpP3KeyFile       = "aitrader_key_openrouter.txt"; // Key file in <Common>\Files
-input string           InpP3Model         = "";                      // Scanner model slug ("OpenRouter"; empty = off)
-input string           InpP4Model         = "";                      // Scanner backup model slug ("OpenRouter-B"; empty = off)
+input string           InpP3Model         = "";                      // Model slug (empty = off)
 
 input group "Who does what (provider names, tried in order)"
 input string           InpChainEntry      = "asAi,DeepSeek";         // ENTRY decision (trades)
-input string           InpChainScan       = "OpenRouter,OpenRouter-B,DeepSeek"; // SCAN (only with 3+ tradeable symbols)
 input string           InpChainManage     = "DeepSeek,asAi";         // MANAGE open positions
 input ENUM_REVIEW_MODE InpReviewMode      = REVIEW_SHADOW;           // 2nd-opinion mode
 input string           InpChainReview     = "DeepSeek,OpenRouter";   // 2nd-opinion reviewer (never the entry provider)
@@ -135,12 +132,9 @@ input bool             InpJsonMode        = true;                    // Request 
 input int              InpTimeoutMs       = 45000;                   // HTTP timeout per provider (ms)
 input int              InpMaxAICallsDay   = 0;                       // Max AI calls per day (0 = mode default)
 
-input group "Scanner"
+input group "Symbols"
 input string           InpSymbols         = "XAUUSD";                // Watchlist (comma separated; broker suffix added automatically)
-input int              InpDirectMaxSymbols= 2;                       // Skip the AI scanner when this many or fewer symbols are tradeable (0 = always scan)
 input ENUM_TIMEFRAMES  InpTimeframe       = PERIOD_H1;               // [Custom] Scan/entry timeframe
-input int              InpMaxCandidates   = 2;                       // [Balanced] Max candidates per scan
-input double           InpMinScanScore    = 0.6;                     // [Balanced] Min scan score
 input int              InpBarsForAI       = 40;                      // [Custom] Bars sent per symbol
 input int              InpStartHour       = 1;                       // [No session bias] Entries from (server hour)
 input int              InpEndHour         = 21;                      // [No session bias] Entries until (server hour)
@@ -149,6 +143,10 @@ input group "Position management"
 input ENUM_TIMEFRAMES  InpManageTF        = PERIOD_M15;              // [Custom] Manage timeframe
 input double           InpMinManageConf   = 0.6;                     // [Balanced] Min AI confidence for management
 input double           InpBreakevenR      = 0.0;                     // Mechanical breakeven at R (0 = leave to AI)
+input bool             InpTrailEnabled    = true;                    // Trailing stop (mechanical, ATR-based)
+input double           InpTrailStartR     = 1.0;                     //    Start trailing once profit reaches N x initial risk (R)
+input double           InpTrailAtr        = 1.0;                     //    Keep the stop N x ATR behind price
+input double           InpTrailStepAtr    = 0.1;                     //    Move only when it improves by N x ATR
 input int              InpMaxHoldHours    = 48;                      // [Custom] Hard close after N hours (0 = off)
 input int              InpFridayCloseHour = 20;                      // Friday: close all & stop from this hour (0 = off)
 input bool             InpSwingHoldWeekend= true;                    // Swing mode: allow holding over the weekend
@@ -254,7 +252,6 @@ struct RuntimeConfig
    int               maxHoldMin;
    int               maxTradesDay;
    int               maxPositions;
-   int               maxCandidates;
    int               timerSec;
    int               maxCalls;
    double            slMin;
@@ -264,7 +261,6 @@ struct RuntimeConfig
    double            riskPct;
    double            minConf;
    double            minManageConf;
-   double            minScanScore;
    int               pendingExpiryMin;
    bool              fridayClose;
    string            styleText;
@@ -334,7 +330,6 @@ int OnInit()
    AddProvider(InpP1Enabled, InpP1Name, InpP1Url, InpP1Key, AITRADER_KEY_ASAI, InpP1KeyFile, InpP1Model, false);
    AddProvider(InpP2Enabled, "DeepSeek", "https://api.deepseek.com/chat/completions", InpP2Key, AITRADER_KEY_DEEPSEEK, InpP2KeyFile, InpP2Model, false);
    AddProvider(InpP3Enabled && InpP3Model != "", "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP3Model, true);
-   AddProvider(InpP3Enabled && InpP4Model != "", "OpenRouter-B", "https://openrouter.ai/api/v1/chat/completions", InpP3Key, AITRADER_KEY_OPENROUTER, InpP3KeyFile, InpP4Model, true);
    if(ArraySize(g_prov) == 0)
      {
       Print("AITrader: no usable AI provider (enable one and give it a key or key file)");
@@ -375,7 +370,12 @@ void OnDeinit(const int reason)
    Comment("");
   }
 
-void OnTick() { if(InpBreakevenR > 0) MechanicalBreakeven(); }
+void OnTick()
+  {
+   if(!AlgoTradingOn()) return;
+   if(InpBreakevenR > 0) MechanicalBreakeven();
+   if(InpTrailEnabled) TrailingStops();
+  }
 
 //+------------------------------------------------------------------+
 //| Main loop                                                         |
@@ -396,6 +396,7 @@ void OnTimer()
 
    // 1. Hard rules first (no AI needed)
    EnforceHardRules();
+   if(InpTrailEnabled) TrailingStops();
 
    // 2. AI position management on each new manage bar
    datetime mBar = iTime(_Symbol, g_cfg.manageTF, 0);
@@ -405,7 +406,7 @@ void OnTimer()
       ManagePositions();
      }
 
-   // 3. AI scan + entries on each new scan bar
+   // 3. AI entry check on each new decision bar
    datetime sBar = iTime(_Symbol, g_cfg.scanTF, 0);
    if(sBar != 0 && sBar != g_lastScanBar)
      {
@@ -469,8 +470,6 @@ bool BuildConfig()
    g_cfg.minConf         = InpMinConfidence;
    g_cfg.minManageConf   = InpMinManageConf;
    g_cfg.maxPositions    = InpMaxPositions;
-   g_cfg.maxCandidates   = InpMaxCandidates;
-   g_cfg.minScanScore    = InpMinScanScore;
    switch(InpRiskProfile)
      {
       case PROFILE_CONSERVATIVE:
@@ -478,15 +477,13 @@ bool BuildConfig()
          g_cfg.minConf = MathMax(g_cfg.minConf, 0.72);       g_cfg.minRR += 0.3;
          g_cfg.minManageConf = MathMax(g_cfg.minManageConf, 0.70);
          g_cfg.maxPositions = (int)MathMin(g_cfg.maxPositions, 2);
-         g_cfg.minScanScore = MathMax(g_cfg.minScanScore, 0.70);
          g_cfg.profileText = "CONSERVATIVE: capital preservation first. Only trend-aligned, high-probability setups; "
                              "lower risk when uncertain; take partial profits and move SL to breakeven early.";
          break;
       case PROFILE_AGGRESSIVE:
          riskMult = 1.5; tradesMult = 1.5;
          g_cfg.minConf = MathMin(g_cfg.minConf, 0.60);       g_cfg.minRR = MathMax(1.0, g_cfg.minRR - 0.3);
-         g_cfg.maxPositions += 2;                            g_cfg.maxCandidates += 1;
-         g_cfg.minScanScore = MathMin(g_cfg.minScanScore, 0.55);
+         g_cfg.maxPositions += 2;
          g_cfg.profileText = "AGGRESSIVE: take more opportunities including momentum breakouts and well-defined "
                              "counter-trend fades; use the upper part of the risk range on strong setups; let "
                              "winners run with trailing stops. Never average down.";
@@ -703,86 +700,30 @@ bool IsFridayClose()
   }
 
 //+------------------------------------------------------------------+
-//| STAGE 1+2: SCAN and ENTRY                                         |
+//| ENTRY CHECK: every tradeable symbol goes straight to the entry AI |
 //+------------------------------------------------------------------+
 void ScanAndEnter()
   {
    string why = "";
    if(!EntryAllowed(why))
-     { g_lastScan = "skipped: " + why; Print("AITrader: scan ", g_lastScan); return; }
+     { g_lastScan = "skipped: " + why; Print("AITrader: entry check ", g_lastScan); return; }
 
-   // Build the scanner table from local indicators
-   string table = "symbol,price,change_pct_24bars,atr_pct,rsi14,ema_trend,range_pos_50bars_pct,spread_atr,has_open_position\n";
-   int rows = 0;
    g_scanSkipped = "";
+   int tradeable = 0;
+   g_lastScan = "checked: ";
    for(int i = 0; i < ArraySize(g_syms); i++)
      {
-      string row = ScanRow(i);
-      if(row != "") { table += row + "\n"; rows++; }
+      if(ScanRow(i) == "") continue;              // no data, market closed, or spread too wide vs ATR
+      tradeable++;
+      if(HasPosition(g_syms[i]) || HasPending(g_syms[i])) continue;
+      if(!EntryAllowed(why)) { Print("AITrader: stop entries - ", why); break; }
+      g_lastScan += g_syms[i] + " ";
+      PrintFormat("AITrader: entry check %s", g_syms[i]);
+      EvaluateEntry(i, "ANY", 0, "");
      }
    if(g_scanSkipped != "")
-      PrintFormat("AITrader: spread > %.2f ATR, not scanned: %s", g_cfg.maxSpreadAtr, g_scanSkipped);
-   if(rows == 0) { g_lastScan = "no tradeable symbols (spreads too wide or no data)"; return; }
-
-   // Few tradeable symbols (e.g. gold only): ranking them is pointless, so ask the entry model directly.
-   if(rows <= InpDirectMaxSymbols)
-     {
-      g_lastScan = "direct mode: ";
-      for(int i = 0; i < ArraySize(g_syms); i++)
-        {
-         if(StringFind(table, g_syms[i] + ",") < 0 || HasPosition(g_syms[i]) || HasPending(g_syms[i])) continue;
-         if(!EntryAllowed(why)) { Print("AITrader: stop entries - ", why); break; }
-         g_lastScan += g_syms[i] + " ";
-         PrintFormat("AITrader: direct entry check %s (scanner skipped, %d tradeable symbol%s)", g_syms[i], rows, rows > 1 ? "s" : "");
-         EvaluateEntry(i, "ANY", 0, "");
-        }
-      return;
-     }
-
-   string system = StringFormat(
-      "You are a professional multi-asset market scanner. From the table, pick at most %d symbols that offer the "
-      "clearest, highest-quality trade setup on the %s timeframe RIGHT NOW (trend continuation after pullback, "
-      "clean breakout, or exhaustion reversal). Avoid symbols with high spread_atr, choppy mixed trends, or an "
-      "existing open position. Avoid picking several highly correlated symbols in the same direction. "
-      "Reply ONLY with JSON: {\"candidates\":[{\"symbol\":\"...\",\"bias\":\"BUY\"|\"SELL\",\"score\":0.0-1.0,"
-      "\"note\":\"max 15 words\"}],\"market_view\":\"max 25 words\"}. An empty candidates list is a valid answer.",
-      g_cfg.maxCandidates, TfName(g_cfg.scanTF));
-   string user = StringFormat("Server time %s. Open positions:\n%s\nScanner table:\n%s",
-                              TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), PositionsSummary(), table);
-
-   string content;
-   string used;
-   if(!CallAI(InpChainScan, InpModelScan, system, user, content, used, "")) { g_lastScan = "AI call failed"; return; }
-
-   string obj = ExtractJsonObject(content);
-   string cands[];
-   JsonArrayObjects(obj, "candidates", cands);
-   string view = JsonGetString(obj, "market_view");
-   g_lastScan = StringFormat("%s | %d picks: ", view, ArraySize(cands));
-   LogRow("SCAN", "", "", 0, 0, 0, 0, 0, StringFormat("%d candidates", ArraySize(cands)), view);
-
-   int analysed = 0;
-   for(int c = 0; c < ArraySize(cands) && analysed < g_cfg.maxCandidates; c++)
-     {
-      string sym   = JsonGetString(cands[c], "symbol");
-      string bias  = JsonGetString(cands[c], "bias");
-      double score = JsonGetNumber(cands[c], "score");
-      string note  = JsonGetString(cands[c], "note");
-      StringToUpper(bias);
-      g_lastScan += StringFormat("%s %s %.2f; ", sym, bias, score);
-
-      int idx = SymbolIndex(sym);
-      if(idx < 0)                  { Print("AITrader: scan picked unknown symbol ", sym); continue; }
-      if(score < g_cfg.minScanScore)
-        { PrintFormat("AITrader: scan pick %s %s score %.2f < %.2f - skipped (%s)", sym, bias, score, g_cfg.minScanScore, note); continue; }
-      if(HasPosition(sym) || HasPending(sym)) continue;
-      if(!EntryAllowed(why))       { Print("AITrader: stop entries - ", why); break; }
-      analysed++;
-      PrintFormat("AITrader: scan pick %s %s score %.2f -> asking for entry (%s)", sym, bias, score, note);
-      EvaluateEntry(idx, bias, score, note);
-     }
-   if(ArraySize(cands) == 0)
-      Print("AITrader: scan - no setups. ", view);
+      PrintFormat("AITrader: spread > %.2f ATR, not checked: %s", g_cfg.maxSpreadAtr, g_scanSkipped);
+   if(tradeable == 0) g_lastScan = "nothing tradeable (spread too wide, market closed or no data)";
   }
 
 bool EntryAllowed(string &why)
@@ -1036,10 +977,13 @@ void ManageOne(ulong ticket)
       "You manage an open %s position on %s. Choose ONE action: HOLD, CLOSE (exit now), PARTIAL (close part, "
       "give close_fraction 0.1-0.9), or MODIFY (new_sl and/or new_tp; use 0 to keep). The stop-loss may only be "
       "moved in the trade's favour (tightened), never widened. Lock profits on strength, cut the trade when the "
-      "setup is invalidated, and avoid over-managing: HOLD is the normal answer while the thesis is intact. "
+      "setup is invalidated, and avoid over-managing: HOLD is the normal answer while the thesis is intact. %s"
       "Reply ONLY with JSON: {\"action\":\"HOLD\"|\"CLOSE\"|\"PARTIAL\"|\"MODIFY\",\"confidence\":0.0-1.0,"
       "\"new_sl\":price,\"new_tp\":price,\"close_fraction\":0.0,\"reason\":\"max 25 words\"}. Prices with %d decimals.",
-      isBuy ? "BUY" : "SELL", sym, dg);
+      isBuy ? "BUY" : "SELL", sym,
+      InpTrailEnabled ? StringFormat("The EA runs a mechanical trailing stop (starts at %.1fR, %.1f ATR behind price); "
+                                     "only MODIFY the stop for a clear structural reason. ", InpTrailStartR, InpTrailAtr) : "",
+      dg);
    string user = StringFormat(
       "Position #%I64u %s %s %.2f lots, opened %s (%.1f h ago) at %s. Current %s. SL %s TP %s. "
       "Floating P/L %.2f %s (%.2fR). Entry note: %s\n",
@@ -2019,7 +1963,7 @@ void UpdateDashboard()
    PanelAddWrapped("PROOF", proven ? "criteria met: 30+ trades, net > 0, PF > 1.2"
                    : StringFormat("%d/30 trades | needs net > 0 and PF > 1.2", sn), proven ? CLR_GOOD : CLR_WARN);
    PanelAdd("", CLR_TEXT);
-   PanelAddWrapped("LAST SCAN", g_lastScan, CLR_TEXT);
+   PanelAddWrapped("LAST CHECK", g_lastScan, CLR_TEXT);
    PanelAddWrapped("LAST EVENT", g_lastEvent, CLR_HEAD);
    DrawPanel();
   }
@@ -2924,4 +2868,71 @@ string SizingHint(int idx)
    return StringFormat("POSITION SIZING: with the minimum lot (%.2f) the stop-loss can be at most %s away from entry "
                        "at the current risk cap; wider stops cannot be traded and will be rejected.\n",
                        SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN), Px(sym, maxSl));
+  }
+
+//+------------------------------------------------------------------+
+//| TRAILING STOP (mechanical, ATR-based, only ever tightens)         |
+//+------------------------------------------------------------------+
+ulong  g_trailIds[];
+double g_trailRisk[];
+
+// Initial risk distance of a position = |open - SL at entry|, read once from the opening order.
+double InitialRisk(ulong posId, double open, double currentSl)
+  {
+   for(int i = 0; i < ArraySize(g_trailIds); i++) if(g_trailIds[i] == posId) return g_trailRisk[i];
+   double risk = 0;
+   if(HistorySelectByPosition(posId))
+     {
+      datetime first = 0;
+      for(int i = 0; i < HistoryOrdersTotal(); i++)
+        {
+         ulong o = HistoryOrderGetTicket(i);
+         datetime t = (datetime)HistoryOrderGetInteger(o, ORDER_TIME_SETUP);
+         double osl = HistoryOrderGetDouble(o, ORDER_SL);
+         if(osl > 0 && (first == 0 || t < first)) { first = t; risk = MathAbs(open - osl); }
+        }
+     }
+   if(risk <= 0 && currentSl > 0) risk = MathAbs(open - currentSl); // fallback
+   if(risk <= 0) return 0;
+   int n = ArraySize(g_trailIds);
+   ArrayResize(g_trailIds, n + 1); ArrayResize(g_trailRisk, n + 1);
+   g_trailIds[n] = posId; g_trailRisk[n] = risk;
+   return risk;
+  }
+
+void TrailingStops()
+  {
+   if(InpDryRun) return;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurs(t)) continue;
+      string sym = PositionGetString(POSITION_SYMBOL);
+      int idx = SymbolIndex(sym);
+      if(idx < 0) continue;
+      double atr = Buf(g_hATR[idx]);
+      if(atr <= 0) continue;
+      bool   isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open = PositionGetDouble(POSITION_PRICE_OPEN), sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP), cur = PositionGetDouble(POSITION_PRICE_CURRENT);
+      double risk = InitialRisk((ulong)PositionGetInteger(POSITION_IDENTIFIER), open, sl);
+      if(!PositionSelectByTicket(t)) continue;      // InitialRisk may change the selection context
+      if(risk <= 0) continue;
+      double profit = isBuy ? cur - open : open - cur;
+      if(profit < InpTrailStartR * risk) continue;
+
+      double newSl = NormPrice(sym, isBuy ? cur - InpTrailAtr * atr : cur + InpTrailAtr * atr);
+      double step  = InpTrailStepAtr * atr;
+      double stop  = StopLevel(sym);
+      double bid = SymbolInfoDouble(sym, SYMBOL_BID), ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+      bool better = isBuy ? (sl == 0 || newSl >= sl + step) : (sl == 0 || newSl <= sl - step);
+      bool valid  = isBuy ? (newSl < bid - stop) : (newSl > ask + stop);
+      if(!better || !valid) continue;
+      if(g_trade.PositionModify(t, newSl, tp))
+        {
+         Notify(StringFormat("trailing stop %s -> %s (profit %.2fR)", sym, Px(sym, newSl), profit / risk));
+         LogRow("MANAGE", sym, "TRAIL", 0, 0, newSl, tp, PositionGetDouble(POSITION_VOLUME), "DONE",
+                StringFormat("mechanical trail %.1f ATR, profit %.2fR", InpTrailAtr, profit / risk));
+        }
+     }
   }

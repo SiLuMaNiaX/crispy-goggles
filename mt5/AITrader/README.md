@@ -149,10 +149,20 @@ Each job has its own ordered list of providers. If the first one fails, the EA t
 |---|---|---|
 | **Entry** (opens trades) | `asAi,DeepSeek` | A single model decides. DeepSeek takes over if asAi is down. |
 | **Second opinion** | `DeepSeek,OpenRouter`, mode **SHADOW** | The reviewer never blocks a trade in shadow mode. Its verdict (AGREES / DISAGREES) is logged and stored in the order comment (`sA` / `sD`). The panel's **SHADOW** line compares results of agreed vs. disagreed trades. Use **VETO** to require agreement, **OFF** to skip it. |
-| **Scan** (3+ tradeable symbols only) | `OpenRouter,OpenRouter-B,DeepSeek` | `OpenRouter` = *Scanner model slug* (a cheap model), `OpenRouter-B` = *Scanner backup model slug*. Both use the OpenRouter key. Leave a slug empty to disable it. In gold-only direct mode the scanner isn't used. |
 | **Manage** open positions | `DeepSeek,asAi` | Runs every manage bar while a trade is open. You can put the cheap OpenRouter model first. |
 
-The provider names are `asAi`, `DeepSeek`, `OpenRouter` and `OpenRouter-B`.
+The provider names are `asAi`, `DeepSeek` and `OpenRouter`. OpenRouter is an optional extra backup: set its *Model slug* to use it. **There is no scanner:** on every decision bar, each tradeable symbol in the watchlist goes straight to the entry model.
+
+## Trailing stop
+
+This is a mechanical rule that runs in the code on every tick, not through the AI:
+- it starts once the trade is **1.0R** in profit, where R is the initial distance from entry to stop-loss;
+- it then keeps the stop **1.0 × ATR** behind price;
+- it only moves when the stop improves by at least 0.1 × ATR, so the broker isn't sent a modification on every tick;
+- it **only ever tightens**; the take-profit stays where it is;
+- the position manager AI is told the trail is active, so it only moves the stop for a clear structural reason.
+
+Inputs: *Trailing stop* (on/off), *Start trailing at N R*, *Keep the stop N × ATR behind price*, *Move only when it improves by N × ATR*. The ATR comes from the mode's decision timeframe (M5 in Scalping).
 
 ## Pending orders (LIMIT / STOP)
 
