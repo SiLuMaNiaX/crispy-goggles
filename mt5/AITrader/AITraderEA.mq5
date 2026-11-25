@@ -148,7 +148,7 @@ input double           InpBreakevenR      = 0.0;                     // Mechanic
 input bool             InpTrailEnabled    = true;                    // Trailing stop (mechanical, ATR-based)
 input double           InpTrailStartR     = 1.0;                     //    Start trailing once profit reaches N x initial risk (R)
 input double           InpTrailAtr        = 1.0;                     //    Keep the stop N x ATR behind price
-input double           InpTrailStepAtr    = 0.1;                     //    Move only when it improves by N x ATR
+input double           InpTrailStepAtr    = 0.25;                    //    Move only when it improves by N x ATR
 input int              InpMaxHoldHours    = 48;                      // [Custom] Hard close after N hours (0 = off)
 input int              InpFridayCloseHour = 20;                      // Friday: close all & stop from this hour (0 = off)
 input bool             InpSwingHoldWeekend= true;                    // Swing mode: allow holding over the weekend
@@ -924,7 +924,17 @@ void ExecuteEntry(int idx, EntryDecision &d, double riskBudget)
    if(err == "")
      {
       lots = LotsForRisk(sym, isBuy, entry, sl, riskPct);
-      if(lots <= 0) err = "risk too small for min lot, or insufficient margin";
+      if(lots <= 0)
+        {
+         double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+         double eqv  = AccountInfoDouble(ACCOUNT_EQUITY);
+         double minLotRisk = eqv > 0 ? LossBetween(sym, isBuy, vmin, entry, sl) / eqv * 100.0 : 0;
+         if(minLotRisk > riskPct)
+            err = StringFormat("%.2f lot would risk %.2f%% but only %.2f%% is allowed now (open risk %.2f%% of the %.2f%% total cap)",
+                               vmin, minLotRisk, riskPct, OpenRiskPct(), InpMaxTotalRiskPct);
+         else
+            err = "not enough free margin for the minimum lot";
+        }
      }
    if(err != "")
      {
@@ -2998,6 +3008,8 @@ void TrailingStops()
       bool better = isBuy ? (sl == 0 || newSl >= sl + step) : (sl == 0 || newSl <= sl - step);
       bool valid  = isBuy ? (newSl < bid - stop) : (newSl > ask + stop);
       if(!better || !valid) continue;
+      if(TimeCurrent() - TrailLastMove(t) < 10) continue;   // at most one modification per position every 10 s
+      TrailMark(t);
       if(g_trade.PositionModify(t, newSl, tp))
         {
          Notify(StringFormat("trailing stop %s -> %s (profit %.2fR)", sym, Px(sym, newSl), profit / risk));
@@ -3284,4 +3296,21 @@ string JournalThesis(ulong posId)
   {
    for(int i = ArraySize(g_jIds) - 1; i >= 0; i--) if(g_jIds[i] == posId) return g_jThesis[i];
    return "";
+  }
+
+ulong    g_trailTk[];
+datetime g_trailAt[];
+
+datetime TrailLastMove(ulong ticket)
+  {
+   for(int i = 0; i < ArraySize(g_trailTk); i++) if(g_trailTk[i] == ticket) return g_trailAt[i];
+   return 0;
+  }
+
+void TrailMark(ulong ticket)
+  {
+   for(int i = 0; i < ArraySize(g_trailTk); i++) if(g_trailTk[i] == ticket) { g_trailAt[i] = TimeCurrent(); return; }
+   int n = ArraySize(g_trailTk);
+   ArrayResize(g_trailTk, n + 1); ArrayResize(g_trailAt, n + 1);
+   g_trailTk[n] = ticket; g_trailAt[n] = TimeCurrent();
   }
